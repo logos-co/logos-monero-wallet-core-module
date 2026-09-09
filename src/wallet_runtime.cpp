@@ -1,4 +1,5 @@
 #include "wallet_runtime.h"
+#include "address_check.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -364,7 +365,8 @@ json WalletRuntime::doCreateTransaction(const json& p) {
     uint64_t amount = 0;
     if (!parseAtomic(p.value("amount", ""), amount) || amount == 0) return err("amount must be a positive decimal string of atomic units");
     const std::string dst = p.value("address", "");
-    if (!MONERO_Wallet_addressValid(dst.c_str(), m_nettype)) return err("invalid destination address for this network");
+    std::string net; { std::lock_guard<std::mutex> g(m_stateMu); net = m_network; }
+    if (!monero_addr::valid(dst, net)) return err("invalid destination address for this network");
     const int priority = p.value("priority", 0);
     const uint32_t account = p.value("accountIndex", 0u);
 
@@ -518,7 +520,7 @@ json WalletRuntime::history() {
 }
 
 bool WalletRuntime::addressValid(const std::string& addr, const std::string& network) {
-    return MONERO_Wallet_addressValid(addr.c_str(), nettypeOf(network));
+    return monero_addr::valid(addr, network);
 }
 
 json WalletRuntime::revealSeed(const std::string& password) {

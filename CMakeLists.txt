@@ -19,6 +19,8 @@ logos_module(
         src/monero_wallet_core_impl.cpp
         src/wallet_runtime.h
         src/wallet_runtime.cpp
+        src/address_check.h
+        src/address_check.cpp
     EXTERNAL_LIBS
         monero_wallet2_api_c
     INCLUDE_DIRS
