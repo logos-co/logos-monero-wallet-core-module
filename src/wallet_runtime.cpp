@@ -15,11 +15,31 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// monero_c returns malloc'd copies; every const char* is freed exactly once here.
+// monero_c is NOT uniform about who owns a returned const char*, and the header documents
+// nothing. Most getters hand back a malloc'd copy the caller must release; a few return an
+// interior pointer into engine-owned storage, and calling free() on one of those is an invalid
+// free that ABORTS the process — which is exactly what killed this module mid-broadcast
+// (___BUG_IN_CLIENT_OF_LIBMALLOC_POINTER_BEING_FREED_WAS_NOT_ALLOCATED, in take(), from
+// doCommit, AFTER the transaction had already been relayed).
+//
+// So ownership is explicit at the call site: take() for the ones proven to be owned copies,
+// borrow() for the ones proven not to be. tools/probe_ownership.cpp reproduces that proof
+// against whichever build of the library is in use; run it before adding a call here.
+
+// Owned by us: copy, then release.
 std::string take(const char* p) {
     std::string s = p ? p : "";
     if (p) MONERO_free(const_cast<char*>(p));
     return s;
+}
+
+// Owned by the engine: copy only. Freeing these aborts the process.
+// Proven so far for MONERO_PendingTransaction_txid; MONERO_TransactionInfo_subaddrIndex has
+// the same "join a list with a separator" signature and is treated the same way until a
+// wallet with history is available to prove it. A leak here would be bounded and harmless;
+// the alternative is a crash that takes an open wallet with it.
+std::string borrow(const char* p) {
+    return p ? std::string(p) : std::string();
 }
 
 int nettypeOf(const std::string& network) {
@@ -413,7 +433,7 @@ json WalletRuntime::doCreateTransaction(const json& p) {
         {"fee", std::to_string(MONERO_PendingTransaction_fee(pt))},
         {"dust", std::to_string(MONERO_PendingTransaction_dust(pt))},
         {"txCount", MONERO_PendingTransaction_txCount(pt)},
-        {"txids", take(MONERO_PendingTransaction_txid(pt, ","))},
+        {"txids", borrow(MONERO_PendingTransaction_txid(pt, ","))},
         {"destination", dst}}}};
 }
 
@@ -426,7 +446,7 @@ json WalletRuntime::doCommit(const json& p) {
     void* pt = it->second;
     const bool ok = MONERO_PendingTransaction_commit(pt, "", false);
     if (!ok) return err(take(MONERO_PendingTransaction_errorString(pt)));
-    const std::string txids = take(MONERO_PendingTransaction_txid(pt, ","));
+    const std::string txids = borrow(MONERO_PendingTransaction_txid(pt, ","));
     m_pendingTx.erase(it);   // monero_c exposes no disposeTransaction; the handle is dropped
     MONERO_Wallet_store(m_wallet, "");
     return json{{"ok", true}, {"result", json{{"txids", txids}}}};
@@ -566,7 +586,7 @@ json WalletRuntime::history() {
             {"unlockTime", MONERO_TransactionInfo_unlockTime(t)},
             {"paymentId", take(MONERO_TransactionInfo_paymentId(t))},
             {"description", take(MONERO_TransactionInfo_description(t))},
-            {"subaddrIndex", take(MONERO_TransactionInfo_subaddrIndex(t, ","))},
+            {"subaddrIndex", borrow(MONERO_TransactionInfo_subaddrIndex(t, ","))},
             {"destinations", dests},
             {"account", MONERO_TransactionInfo_subaddrAccount(t)}});
     }
