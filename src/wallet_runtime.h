@@ -40,6 +40,7 @@ public:
     std::string address(uint64_t account, uint64_t index);
     nlohmann::json subaddresses(uint32_t account);
     nlohmann::json createSubaddress(uint32_t account, const std::string& label);
+    nlohmann::json setSubaddressLabel(uint32_t account, uint32_t index, const std::string& label);
     nlohmann::json history();
     bool addressValid(const std::string& addr, const std::string& network);
     nlohmann::json revealSeed(const std::string& password);

@@ -491,6 +491,18 @@ json WalletRuntime::createSubaddress(uint32_t account, const std::string& label)
     return json{{"ok", true}, {"result", json{{"index", idx}, {"address", take(MONERO_Wallet_address(m_wallet, account, idx))}}}};
 }
 
+// Rename or clear a subaddress label. Index 0 is the account's primary address, which
+// wallet2 also labels ("Primary account"), so it is editable like any other.
+json WalletRuntime::setSubaddressLabel(uint32_t account, uint32_t index, const std::string& label) {
+    std::shared_lock<std::shared_mutex> h(m_handleMu);
+    if (!m_wallet) return err("no wallet open");
+    if (index >= MONERO_Wallet_numSubaddresses(m_wallet, account)) return err("no such subaddress");
+    MONERO_Wallet_setSubaddressLabel(m_wallet, account, index, label.c_str());
+    MONERO_Wallet_store(m_wallet, "");
+    return json{{"ok", true}, {"result", json{{"index", index},
+                {"label", take(MONERO_Wallet_getSubaddressLabel(m_wallet, account, index))}}}};
+}
+
 json WalletRuntime::history() {
     json out = json::array();
     std::shared_lock<std::shared_mutex> h(m_handleMu);
@@ -502,6 +514,14 @@ json WalletRuntime::history() {
     for (int i = 0; i < n; ++i) {
         void* t = MONERO_TransactionHistory_transaction(hist, i);
         if (!t) continue;
+        // Where an outgoing payment went. wallet2 records destinations only for transfers this
+        // wallet made, so an incoming row carries none — the UI must not present that as "unknown".
+        json dests = json::array();
+        const int dn = MONERO_TransactionInfo_transfers_count(t);
+        for (int d = 0; d < dn; ++d) {
+            dests.push_back(json{{"address", take(MONERO_TransactionInfo_transfers_address(t, d))},
+                                 {"amount", std::to_string(MONERO_TransactionInfo_transfers_amount(t, d))}});
+        }
         out.push_back(json{
             {"txid", take(MONERO_TransactionInfo_hash(t))},
             {"direction", MONERO_TransactionInfo_direction(t) == 0 ? "in" : "out"},
@@ -512,8 +532,12 @@ json WalletRuntime::history() {
             {"timestamp", MONERO_TransactionInfo_timestamp(t)},
             {"pending", MONERO_TransactionInfo_isPending(t)},
             {"failed", MONERO_TransactionInfo_isFailed(t)},
+            {"coinbase", MONERO_TransactionInfo_isCoinbase(t)},
             {"unlockTime", MONERO_TransactionInfo_unlockTime(t)},
             {"paymentId", take(MONERO_TransactionInfo_paymentId(t))},
+            {"description", take(MONERO_TransactionInfo_description(t))},
+            {"subaddrIndex", take(MONERO_TransactionInfo_subaddrIndex(t, ","))},
+            {"destinations", dests},
             {"account", MONERO_TransactionInfo_subaddrAccount(t)}});
     }
     return out;

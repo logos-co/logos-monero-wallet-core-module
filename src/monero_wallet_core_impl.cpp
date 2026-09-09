@@ -84,6 +84,10 @@ LogosList MoneroWalletCoreImpl::subaddresses(int64_t a) { return m_rt->subaddres
 StdLogosResult MoneroWalletCoreImpl::createSubaddress(int64_t a, const std::string& label) {
     return fromJson(m_rt->createSubaddress(static_cast<uint32_t>(a < 0 ? 0 : a), label));
 }
+StdLogosResult MoneroWalletCoreImpl::setSubaddressLabel(int64_t a, int64_t i, const std::string& label) {
+    return fromJson(m_rt->setSubaddressLabel(static_cast<uint32_t>(a < 0 ? 0 : a),
+                                             static_cast<uint32_t>(i < 0 ? 0 : i), label));
+}
 LogosList MoneroWalletCoreImpl::history() { return m_rt->history(); }
 bool MoneroWalletCoreImpl::addressValid(const std::string& addr, const std::string& network) {
     return m_rt->addressValid(addr, network);

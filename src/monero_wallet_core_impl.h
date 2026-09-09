@@ -90,6 +90,8 @@ public:
 
     /// Add a subaddress to an account. Returns `{ index, address }`.
     StdLogosResult createSubaddress(int64_t accountIndex, const std::string& label);
+    /// Rename (or clear, with an empty string) a subaddress label. Returns `{ index, label }`.
+    StdLogosResult setSubaddressLabel(int64_t accountIndex, int64_t addressIndex, const std::string& label);
 
     /// `[ { txid, direction: "in"|"out", amount, fee, height, confirmations, timestamp,
     ///      pending, failed, unlockTime, paymentId } ]`, amounts as decimal strings.
