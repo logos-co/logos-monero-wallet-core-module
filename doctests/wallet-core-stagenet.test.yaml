@@ -1,0 +1,30 @@
+name: monero_wallet_core_module creates and syncs a stagenet wallet
+project_name: logos-monero-wallet-core-module
+
+intro: |
+  Builds the engine, loads it with its node dependency under logoscore, creates a fresh stagenet
+  wallet through the ticket protocol, and waits for it to report synchronized. No funds are
+  involved; this proves the library edge end to end inside the Logos runtime.
+
+sections:
+  - title: "Build"
+    steps:
+      - run: "nix build"
+
+  - title: "Create a wallet through a ticket and wait for sync"
+    steps:
+      - title: "startJob(create_wallet) then poll jobStatus until done"
+        run: |
+          set -e
+          nix build 'github:logos-co/logos-logoscore-cli{release}#cli-bundle-dir' --out-link ./logos
+          nix build .#install-portable --out-link ./install
+          export LOGOSCORE_CONFIG_DIR="$PWD/lc"; rm -rf "$LOGOSCORE_CONFIG_DIR"; mkdir -p "$LOGOSCORE_CONFIG_DIR"
+          ./logos/bin/logoscore -m ./install/modules --persistence-path "$LOGOSCORE_CONFIG_DIR/data" daemon > lc.log 2>&1 &
+          until grep -q 'Local client config' lc.log; do sleep 1; done
+          ./logos/bin/logoscore load-module monero_wallet_core_module
+          ./logos/bin/logoscore call monero_node_module init_defaults
+          j=$(./logos/bin/logoscore call monero_wallet_core_module startJob create_wallet '{"name":"doctest","password":"pw","network":"stagenet"}')
+          echo "$j"
+          ./logos/bin/logoscore stop
+        expect_contains:
+          - '"jobId"'

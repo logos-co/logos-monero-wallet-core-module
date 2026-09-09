@@ -1,0 +1,21 @@
+{
+  "name": "monero_wallet_core_module",
+  "display_name": "Monero Wallet Core",
+  "version": "0.1.0",
+  "type": "core",
+  "interface": "universal",
+  "concurrency": "multi",
+  "category": "wallet",
+  "description": "In-process Monero wallet engine: wraps monero_c (wallet2 C ABI, LGPL-3.0, dynamically linked). Keys and the wallet password never leave this module.",
+  "author": "Logos Core Team",
+  "main": "monero_wallet_core_module_plugin",
+  "codegen": { "impl_header": "monero_wallet_core_impl.h", "impl_class": "MoneroWalletCoreImpl" },
+  "dependencies": ["monero_node_module"],
+  "include": [],
+  "capabilities": [],
+  "nix": {
+    "packages": { "build": [], "runtime": ["nlohmann_json"] },
+    "external_libraries": [ { "name": "monero_wallet2_api_c" } ],
+    "cmake": { "extra_include_dirs": ["lib"] }
+  }
+}
