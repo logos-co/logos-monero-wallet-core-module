@@ -173,7 +173,11 @@ void WalletRuntime::threadMain() {
             if (m_stop) return;
             if (!m_queue.empty()) { job = m_queue.front(); m_queue.pop_front(); job->state = "running"; }
         }
-        if (job) run(job); else tick();
+        // tick() calls into wallet2 too, so it gets the same protection as a job.
+        try {
+            if (job) run(job); else tick();
+        } catch (...) {
+        }
     }
 }
 
@@ -191,6 +195,10 @@ void WalletRuntime::run(const std::shared_ptr<Job>& job) {
         else if (k == "change_password")     out = doChangePassword(job->params);
     } catch (const std::exception& e) {
         out = err(std::string("exception: ") + e.what());
+    } catch (...) {
+        // Not every throw from wallet2 and its dependencies derives from std::exception, and
+        // one escaping this thread takes the entire module process down with it.
+        out = err("the wallet engine raised an unknown error");
     }
     std::string state;
     {
@@ -199,7 +207,11 @@ void WalletRuntime::run(const std::shared_ptr<Job>& job) {
         else { job->state = "failed"; job->error = out.value("error", "unknown error"); }
         state = job->state;
     }
-    m_emit("jobFinished", json{{"jobId", job->id}, {"state", state}});
+    try {
+        m_emit("jobFinished", json{{"jobId", job->id}, {"state", state}});
+    } catch (...) {
+        // The emit crosses IPC; a failure there must not abort a job that already settled.
+    }
 }
 
 // Idle tick: flip syncing -> ready when wallet2 reports synchronized (and back if it
@@ -358,9 +370,25 @@ json WalletRuntime::doRescan() {
     return json{{"ok", true}, {"result", json::object()}};
 }
 
+// wallet2 is NOT safe for concurrent use, and we run its own auto-refresh thread (2 s) so the
+// balance tracks the chain without polling. Building or committing a transaction while that
+// thread is inside the same wallet2 object is what monero-wallet-gui avoids by calling
+// pauseRefresh() first — and what aborted this module (signal 6) mid-commit. Pause for the
+// whole operation and resume no matter how we leave it.
+namespace {
+struct RefreshPause {
+    void* w;
+    explicit RefreshPause(void* wallet) : w(wallet) { if (w) MONERO_Wallet_pauseRefresh(w); }
+    ~RefreshPause() { if (w) { MONERO_Wallet_startRefresh(w); } }
+    RefreshPause(const RefreshPause&) = delete;
+    RefreshPause& operator=(const RefreshPause&) = delete;
+};
+}
+
 json WalletRuntime::doCreateTransaction(const json& p) {
     std::shared_lock<std::shared_mutex> h(m_handleMu);
     if (!m_wallet) return err("no wallet open");
+    RefreshPause pause(m_wallet);
     if (MONERO_Wallet_watchOnly(m_wallet)) return err("view-only wallet cannot spend");
     uint64_t amount = 0;
     if (!parseAtomic(p.value("amount", ""), amount) || amount == 0) return err("amount must be a positive decimal string of atomic units");
@@ -392,6 +420,7 @@ json WalletRuntime::doCreateTransaction(const json& p) {
 json WalletRuntime::doCommit(const json& p) {
     std::shared_lock<std::shared_mutex> h(m_handleMu);
     if (!m_wallet) return err("no wallet open");
+    RefreshPause pause(m_wallet);
     auto it = m_pendingTx.find(p.value("txHandle", ""));
     if (it == m_pendingTx.end()) return err("unknown txHandle");
     void* pt = it->second;
@@ -414,6 +443,7 @@ json WalletRuntime::doDispose(const json& p) {
 json WalletRuntime::doChangePassword(const json& p) {
     std::shared_lock<std::shared_mutex> h(m_handleMu);
     if (!m_wallet) return err("no wallet open");
+    RefreshPause pause(m_wallet);
     if (!verifyPassword(p.value("oldPassword", ""))) return err("wrong password");
     if (!MONERO_Wallet_setPassword(m_wallet, p.value("newPassword", "").c_str()))
         return err(take(MONERO_Wallet_errorString(m_wallet)));
