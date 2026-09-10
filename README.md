@@ -30,15 +30,13 @@ disconnected.
 `libmonero_wallet2_api_c.{dylib,so,dll}` per target (darwin arm64/x64, linux arm64/x64,
 mingw x64), and lays it out as `lib/` + `include/` + the license. It is **LGPL-3.0** and is
 linked **dynamically** as a separate shared object beside the plugin, never statically —
-a user may substitute a modified copy by replacing that file, and `ci.yml` asserts that the
-library is actually in the payload rather than folded into the plugin.
+a user may substitute a modified copy by replacing that file.
 
-**Known gap.** The license text is installed into the library derivation
-(`share/licenses/monero_c/LICENSE`) but is **not** copied into the module payload, so it does
-not travel in the `.lgx`. The builder stages an external library's `lib/` and `bin/` only; the
-fix is to install `LICENSE.monero_c` into the derivation's `lib/` and name it in
-`metadata.json`'s `include` list. Until then this repo's `LICENSE.monero_c` is the copy of
-record.
+The license text travels with it: the derivation installs `LICENSE.monero_c` into its `lib/`
+(the only place the builder's `include` staging looks) and `metadata.json` names it in
+`include`, so it lands beside the plugin in the payload and inside the `.lgx`. `ci.yml`
+asserts both — the library present as its own file, and the license byte-identical to this
+repo's `LICENSE.monero_c`.
 
 ## Build
 
