@@ -37,15 +37,15 @@ sections:
           ls tree/modules
         expect_contains: ["monero_node_module", "monero_wallet_core_module"]
 
-      - title: "The LGPL library ships beside the plugin, not linked into it"
+      - title: "The LGPL library and its license ship beside the plugin, not linked into it"
         # LGPL-3.0 compliance rests on monero_c being a SEPARATE shared library a user can
-        # replace, so assert that it actually travels in the payload rather than assuming the
-        # builder staged it. (The upstream LICENSE is installed into the library derivation's
-        # share/licenses, but is NOT yet copied into this payload — see the repo README.)
+        # replace, carrying its license text, so assert that both actually travel in the
+        # payload rather than assuming the builder staged them.
         run: |
           set -eu
           ls result-core/modules/monero_wallet_core_module
-        expect_contains: ["libmonero_wallet2_api_c", "monero_wallet_core_module_plugin"]
+        expect_contains:
+          ["libmonero_wallet2_api_c", "monero_wallet_core_module_plugin", "LICENSE.monero_c"]
 
   - title: "Create a wallet through a ticket and wait for it to settle"
     steps:

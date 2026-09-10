@@ -40,6 +40,9 @@ pkgs.stdenvNoCC.mkDerivation {
     for f in libmonero_wallet2_api_c.*; do install -m0644 "$f" "$out/lib/$f"; done
     install -m0644 ${src}/lib/monero_wallet2_api_c.h ${src}/lib/monero_checksum.h "$out/include/"
     install -m0644 ${src}/LICENSE.monero_c "$out/share/licenses/monero_c/LICENSE"
+    # Also in lib/, because that is the only place the module builder's `include`
+    # staging looks — LGPL-3.0 §4(d) wants the text beside the library it covers.
+    install -m0644 ${src}/LICENSE.monero_c "$out/lib/LICENSE.monero_c"
     runHook postInstall
   '';
   meta = {
