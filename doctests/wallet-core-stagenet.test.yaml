@@ -1,30 +1,108 @@
 name: monero_wallet_core_module creates and syncs a stagenet wallet
 project_name: logos-monero-wallet-core-module
 
+# Every build is a flake URL rather than a bare `nix build`: the harness runs each step in a
+# throwaway working directory, not in the checkout. CI pins {release} to the commit under test
+# with --release-for; a local run gets main.
+#
+# `#install` stages ONE module — a dependency is not pulled in with it — so the node module is
+# built and staged alongside, and the shell here is POSIX (the harness runs steps under
+# /bin/sh, which is dash on the Linux runner: no `pipefail`, no here-strings).
+
 intro: |
-  Builds the engine, loads it with its node dependency under logoscore, creates a fresh stagenet
-  wallet through the ticket protocol, and waits for it to report synchronized. No funds are
-  involved; this proves the library edge end to end inside the Logos runtime.
+  Builds the engine, loads it with its node dependency under the logoscore daemon, creates a
+  fresh stagenet wallet through the ticket protocol, and reads back the wallet it opened. No
+  funds are involved; this proves the library edge end to end inside the Logos runtime.
 
 sections:
-  - title: "Build"
+  - title: "Build the engine, its node dependency, and the runtime"
     steps:
-      - run: "nix build"
-
-  - title: "Create a wallet through a ticket and wait for sync"
-    steps:
-      - title: "startJob(create_wallet) then poll jobStatus until done"
+      - title: "Build and stage both modules"
         run: |
-          set -e
+          set -eu
           nix build 'github:logos-co/logos-logoscore-cli{release}#cli-bundle-dir' --out-link ./logos
-          nix build .#install-portable --out-link ./install
-          export LOGOSCORE_CONFIG_DIR="$PWD/lc"; rm -rf "$LOGOSCORE_CONFIG_DIR"; mkdir -p "$LOGOSCORE_CONFIG_DIR"
-          ./logos/bin/logoscore -m ./install/modules --persistence-path "$LOGOSCORE_CONFIG_DIR/data" daemon > lc.log 2>&1 &
-          until grep -q 'Local client config' lc.log; do sleep 1; done
+          nix build 'github:logos-co/logos-monero-node-module{release}#install-portable' --no-write-lock-file -o result-node
+          nix build 'github:logos-co/logos-monero-wallet-core-module{release}#install-portable' --no-write-lock-file -o result-core
+          mkdir -p tree/modules
+          cp -rL result-node/modules/* result-core/modules/* tree/modules/
+          chmod -R u+w tree
+          ls tree/modules
+        code_block: |
+          nix build 'github:logos-co/logos-logoscore-cli#cli-bundle-dir' --out-link ./logos
+          nix build 'github:logos-co/logos-monero-node-module#install-portable' -o result-node
+          nix build 'github:logos-co/logos-monero-wallet-core-module#install-portable' -o result-core
+          mkdir -p tree/modules
+          cp -rL result-node/modules/* result-core/modules/* tree/modules/
+          chmod -R u+w tree
+          ls tree/modules
+        expect_contains: ["monero_node_module", "monero_wallet_core_module"]
+
+      - title: "The LGPL library ships beside the plugin, not linked into it"
+        # LGPL-3.0 compliance rests on monero_c being a SEPARATE shared library a user can
+        # replace, so assert that it actually travels in the payload rather than assuming the
+        # builder staged it. (The upstream LICENSE is installed into the library derivation's
+        # share/licenses, but is NOT yet copied into this payload — see the repo README.)
+        run: |
+          set -eu
+          ls result-core/modules/monero_wallet_core_module
+        expect_contains: ["libmonero_wallet2_api_c", "monero_wallet_core_module_plugin"]
+
+  - title: "Create a wallet through a ticket and wait for it to settle"
+    steps:
+      - title: "startJob(create_wallet), poll jobStatus, then read the wallet back"
+        # A map argument needs the `json:` prefix. Without it the CLI coerces the text to a
+        # STRING, the engine's `params.is_object()` guard turns it into an empty object, and
+        # the job is refused with no name — a silent-looking failure with a real cause.
+        run: |
+          set -eu
+          export LOGOSCORE_CONFIG_DIR="$PWD/session"
+          rm -rf "$LOGOSCORE_CONFIG_DIR"; mkdir -p "$LOGOSCORE_CONFIG_DIR"
+          ./logos/bin/logoscore -m ./tree/modules \
+            --persistence-path "$LOGOSCORE_CONFIG_DIR/data" daemon > daemon.log 2>&1 &
+          for i in $(seq 1 60); do
+            if grep -q 'Local client config' daemon.log; then break; fi
+            sleep 1
+          done
           ./logos/bin/logoscore load-module monero_wallet_core_module
           ./logos/bin/logoscore call monero_node_module init_defaults
-          j=$(./logos/bin/logoscore call monero_wallet_core_module startJob create_wallet '{"name":"doctest","password":"pw","network":"stagenet"}')
+          # wallet2 binds its daemon at init, so the node has to be reachable BEFORE the
+          # wallet is created — a wallet built against a dead endpoint stays disconnected for
+          # its whole life. A public node is somebody else's machine: try the seeded default,
+          # then two alternates.
+          health=$(./logos/bin/logoscore call monero_node_module node_health stagenet)
+          case "$health" in
+            *'\"reachable\":true'*) ;;
+            *)
+              for u in http://node2.monerodevs.org:38089 http://node3.monerodevs.org:38089; do
+                ./logos/bin/logoscore call monero_node_module set_node_config stagenet "str:{\"url\":\"$u\"}"
+                health=$(./logos/bin/logoscore call monero_node_module node_health stagenet)
+                case "$health" in *'\"reachable\":true'*) break;; esac
+              done
+              ;;
+          esac
+          j=$(./logos/bin/logoscore call monero_wallet_core_module startJob create_wallet \
+                'json:{"name":"doctest","password":"pw","network":"stagenet"}')
           echo "$j"
+          id=$(printf '%s' "$j" | python3 -c 'import json,sys;print(json.load(sys.stdin)["result"]["value"]["jobId"])')
+          rcpt=$(printf '%s' "$j" | python3 -c 'import json,sys;print(json.load(sys.stdin)["result"]["value"]["receipt"])')
+          for i in $(seq 1 60); do
+            s=$(./logos/bin/logoscore call monero_wallet_core_module jobStatus "$id" "$rcpt")
+            case "$s" in *'"done"'*|*'"failed"'*) break;; esac
+            sleep 2
+          done
+          echo "$s"
+          # The engine reaches the daemon on its worker thread, so a status read taken the
+          # instant the job settles still says connected:false. Poll it.
+          for i in $(seq 1 30); do
+            st=$(./logos/bin/logoscore call monero_wallet_core_module status)
+            case "$st" in *'"connected":true'*) break;; esac
+            sleep 2
+          done
+          echo "$st"
           ./logos/bin/logoscore stop
         expect_contains:
-          - '"jobId"'
+          - '"jobId":"j1"'
+          - '"state":"done"'
+          - '"wallet":"doctest"'
+          - '"network":"stagenet"'
+          - '"connected":true'

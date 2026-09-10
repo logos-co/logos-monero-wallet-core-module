@@ -4,7 +4,7 @@
   inputs = {
     logos-module-builder.url = "github:logos-co/logos-module-builder";
     logos-nix.url = "github:logos-co/logos-nix";
-    # Local path until the repo is published (P8 switches this to github:).
+    # Follows THIS module-builder: a skewed generated ABI segfaults in provider init.
     monero_node_module = {
       url = "github:logos-co/logos-monero-node-module";
       inputs.logos-module-builder.follows = "logos-module-builder";
