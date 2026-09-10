@@ -6,7 +6,7 @@
     logos-nix.url = "github:logos-co/logos-nix";
     # Local path until the repo is published (P8 switches this to github:).
     monero_node_module = {
-      url = "path:/Users/dlipicar/repos/logos-monero-node-module";
+      url = "github:logos-co/logos-monero-node-module";
       inputs.logos-module-builder.follows = "logos-module-builder";
     };
   };

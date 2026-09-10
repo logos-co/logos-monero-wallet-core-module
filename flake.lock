@@ -11357,14 +11357,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1788927409,
-        "narHash": "sha256-XyjEKOSQzagSSpvmAa+AEBgDaXj15QwqKHArig0WcEw=",
-        "path": "/Users/dlipicar/repos/logos-monero-node-module",
-        "type": "path"
+        "lastModified": 1788927408,
+        "narHash": "sha256-gBgpVKZc6xejVv0tTcsH+vVkcs4fuoY3GNl/Iova15k=",
+        "owner": "logos-co",
+        "repo": "logos-monero-node-module",
+        "rev": "8ff66d08aa3d702921b94bbb99f7fb59863caa53",
+        "type": "github"
       },
       "original": {
-        "path": "/Users/dlipicar/repos/logos-monero-node-module",
-        "type": "path"
+        "owner": "logos-co",
+        "repo": "logos-monero-node-module",
+        "type": "github"
       }
     },
     "nix-bundle-appimage": {
