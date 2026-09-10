@@ -1,4 +1,7 @@
 #include "wallet_runtime.h"
+
+#include <cctype>
+#include <set>
 #include "address_check.h"
 
 #include <chrono>
@@ -31,6 +34,23 @@ std::string take(const char* p) {
     std::string s = p ? p : "";
     if (p) MONERO_free(const_cast<char*>(p));
     return s;
+}
+
+// A Monero transaction hash is 32 bytes as 64 hex characters. txid() may hand back several,
+// joined by the separator. Anything else — empty, truncated, garbage from a pointer whose
+// storage has already gone — is not shown to the user as a transaction id.
+bool looksLikeTxid(const std::string& joined) {
+    if (joined.empty()) return false;
+    size_t start = 0;
+    while (start <= joined.size()) {
+        const size_t comma = joined.find(',', start);
+        const std::string one = joined.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        if (one.size() != 64) return false;
+        for (char c : one) if (!std::isxdigit(static_cast<unsigned char>(c))) return false;
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    return true;
 }
 
 // Owned by the engine: copy only. Freeing these aborts the process.
@@ -437,6 +457,21 @@ json WalletRuntime::doCreateTransaction(const json& p) {
         {"destination", dst}}}};
 }
 
+// Every transaction hash the wallet knows right now. Used to identify what a commit produced
+// when the engine will not tell us directly.
+std::set<std::string> WalletRuntime::knownTxids() {
+    std::set<std::string> out;
+    void* hist = MONERO_Wallet_history(m_wallet);
+    if (!hist) return out;
+    MONERO_TransactionHistory_refresh(hist);
+    const int n = MONERO_TransactionHistory_count(hist);
+    for (int i = 0; i < n; ++i) {
+        void* t = MONERO_TransactionHistory_transaction(hist, i);
+        if (t) out.insert(take(MONERO_TransactionInfo_hash(t)));
+    }
+    return out;
+}
+
 json WalletRuntime::doCommit(const json& p) {
     std::shared_lock<std::shared_mutex> h(m_handleMu);
     if (!m_wallet) return err("no wallet open");
@@ -444,9 +479,22 @@ json WalletRuntime::doCommit(const json& p) {
     auto it = m_pendingTx.find(p.value("txHandle", ""));
     if (it == m_pendingTx.end()) return err("unknown txHandle");
     void* pt = it->second;
+    // What the wallet knew before, so the new transaction can be identified afterwards.
+    const std::set<std::string> before = knownTxids();
+
     const bool ok = MONERO_PendingTransaction_commit(pt, "", false);
     if (!ok) return err(take(MONERO_PendingTransaction_errorString(pt)));
-    const std::string txids = borrow(MONERO_PendingTransaction_txid(pt, ","));
+
+    // The relay has happened. Everything below is reporting, and MUST NOT be able to lose the
+    // fact that it happened — that is precisely what the free() on txid() used to do.
+    std::string txids = borrow(MONERO_PendingTransaction_txid(pt, ","));
+    if (!looksLikeTxid(txids)) {
+        // This build returns an unusable pointer here (freeing it aborts, reading it yields
+        // nothing), so fall back to the authority: whatever hash the wallet gained.
+        txids.clear();
+        for (const std::string& h : knownTxids())
+            if (!h.empty() && !before.count(h)) { if (!txids.empty()) txids += ","; txids += h; }
+    }
     m_pendingTx.erase(it);   // monero_c exposes no disposeTransaction; the handle is dropped
     MONERO_Wallet_store(m_wallet, "");
     return json{{"ok", true}, {"result", json{{"txids", txids}}}};
