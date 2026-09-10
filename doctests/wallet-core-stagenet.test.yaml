@@ -73,7 +73,7 @@ sections:
           case "$health" in
             *'\"reachable\":true'*) ;;
             *)
-              for u in http://node2.monerodevs.org:38089 http://node3.monerodevs.org:38089; do
+              for u in http://node3.monerodevs.org:38089 http://node.monerodevs.org:38089; do
                 ./logos/bin/logoscore call monero_node_module set_node_config stagenet "str:{\"url\":\"$u\"}"
                 health=$(./logos/bin/logoscore call monero_node_module node_health stagenet)
                 case "$health" in *'\"reachable\":true'*) break;; esac
