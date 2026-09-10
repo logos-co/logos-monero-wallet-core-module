@@ -43,7 +43,6 @@ public:
     nlohmann::json createSubaddress(uint32_t account, const std::string& label);
     nlohmann::json setSubaddressLabel(uint32_t account, uint32_t index, const std::string& label);
     nlohmann::json history();
-    std::set<std::string> knownTxids();
     bool addressValid(const std::string& addr, const std::string& network);
     nlohmann::json revealSeed(const std::string& password);
     nlohmann::json revealViewKey(const std::string& password);
@@ -93,8 +92,11 @@ private:
     bool m_stop = false;
     uint64_t m_nextId = 1;
 
-    // The handles. m_handleMu: shared for reads, unique for open/close.
-    mutable std::shared_mutex m_handleMu;
+    // The handles. m_handleMu means EXCLUSIVE ACCESS TO wallet2, not merely "the pointer is
+    // alive": wallet2 is not safe for concurrent use, and this module is multi-dispatch, so a
+    // read arriving on an IPC thread would otherwise be inside wallet2 while the worker is
+    // committing. Every mutation takes it uniquely; reads share it, with a deadline.
+    mutable std::shared_timed_mutex m_handleMu;
     void* m_wm = nullptr;
     void* m_wallet = nullptr;
     std::map<std::string, void*> m_pendingTx;   // txHandle -> PendingTransaction*

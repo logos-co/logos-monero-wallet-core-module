@@ -53,15 +53,25 @@ bool looksLikeTxid(const std::string& joined) {
     return true;
 }
 
-// Owned by the engine: copy only. Freeing these aborts the process.
+// The separator-joining getters (monero_c's vectorToString family: PendingTransaction_txid,
+// TransactionInfo_subaddrIndex, ...) are owned by the CALLER when they produce something and
+// return a shared read-only literal when the list is empty. Freeing the literal is an invalid
+// free and aborts the process; not freeing the buffer leaks one allocation per call.
 //
-// Exactly ONE call is known to need this: MONERO_PendingTransaction_txid. The obvious
-// heuristic — "anything taking a separator joins into a temporary" — was TESTED AND IS FALSE:
-// MONERO_TransactionInfo_subaddrIndex takes a separator and is an ordinary owned copy. There
-// is no rule to infer from a signature. Measure each one (tools/probe_ownership.cpp).
-std::string borrow(const char* p) {
-    return p ? std::string(p) : std::string();
+// Measured on a real funded transaction against 0.18.4.6-RC2:
+//   txid BEFORE commit -> "fdc46c0a…b917" (64 hex), FREEABLE
+//   txid AFTER  commit -> ""             , ABORTS on free
+// So the rule is the emptiness, not the function.
+std::string takeJoined(const char* p) {
+    std::string s = p ? p : "";
+    if (p && *p) MONERO_free(const_cast<char*>(p));
+    return s;
 }
+
+// A read never waits longer than this for the wallet. A build fetches decoys for ~15 s holding
+// the wallet exclusively, and the IPC deadline is 20 s: blocking a status poll behind it would
+// turn a busy wallet into a dead one. Reporting "busy" keeps the surface honest and responsive.
+constexpr std::chrono::milliseconds kReadWait{750};
 
 int nettypeOf(const std::string& network) {
     if (network == "testnet") return 1;
@@ -258,7 +268,7 @@ void WalletRuntime::run(const std::shared_ptr<Job>& job) {
 // Idle tick: flip syncing -> ready when wallet2 reports synchronized (and back if it
 // falls behind), so the state event fires without anyone polling status().
 void WalletRuntime::tick() {
-    std::shared_lock<std::shared_mutex> h(m_handleMu);
+    std::shared_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return;
     const bool synced = MONERO_Wallet_synchronized(m_wallet);
     h.unlock();
@@ -299,7 +309,7 @@ json WalletRuntime::doOpenLike(const std::shared_ptr<Job>& job) {
         return err("proxy required for " + network + " but none configured (fail-closed: refusing to connect in the clear)");
 
     {
-        std::shared_lock<std::shared_mutex> h(m_handleMu);
+        std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
         if (m_wallet) return err("a wallet is already open; close it first");
     }
     setState(State::Opening);
@@ -367,7 +377,7 @@ json WalletRuntime::doOpenLike(const std::shared_ptr<Job>& job) {
 
     const std::string addr = take(MONERO_Wallet_address(w, 0, 0));
     {
-        std::unique_lock<std::shared_mutex> h(m_handleMu);
+        std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
         m_wallet = w;
     }
     {
@@ -385,7 +395,7 @@ json WalletRuntime::doOpenLike(const std::shared_ptr<Job>& job) {
 }
 
 json WalletRuntime::doClose() {
-    std::unique_lock<std::shared_mutex> h(m_handleMu);
+    std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return err("no wallet open");
     setState(State::Closing);
     void* w = m_wallet;
@@ -403,7 +413,7 @@ json WalletRuntime::doClose() {
 }
 
 json WalletRuntime::doRescan() {
-    std::shared_lock<std::shared_mutex> h(m_handleMu);
+    std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return err("no wallet open");
     MONERO_Wallet_rescanBlockchainAsync(m_wallet);
     h.unlock();
@@ -427,7 +437,7 @@ struct RefreshPause {
 }
 
 json WalletRuntime::doCreateTransaction(const json& p) {
-    std::shared_lock<std::shared_mutex> h(m_handleMu);
+    std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return err("no wallet open");
     RefreshPause pause(m_wallet);
     if (MONERO_Wallet_watchOnly(m_wallet)) return err("view-only wallet cannot spend");
@@ -454,55 +464,32 @@ json WalletRuntime::doCreateTransaction(const json& p) {
         {"fee", std::to_string(MONERO_PendingTransaction_fee(pt))},
         {"dust", std::to_string(MONERO_PendingTransaction_dust(pt))},
         {"txCount", MONERO_PendingTransaction_txCount(pt)},
-        {"txids", borrow(MONERO_PendingTransaction_txid(pt, ","))},
+        {"txids", takeJoined(MONERO_PendingTransaction_txid(pt, ","))},
         {"destination", dst}}}};
 }
 
-// Every transaction hash the wallet knows right now. Used to identify what a commit produced
-// when the engine will not tell us directly.
-std::set<std::string> WalletRuntime::knownTxids() {
-    std::set<std::string> out;
-    void* hist = MONERO_Wallet_history(m_wallet);
-    if (!hist) return out;
-    MONERO_TransactionHistory_refresh(hist);
-    const int n = MONERO_TransactionHistory_count(hist);
-    for (int i = 0; i < n; ++i) {
-        void* t = MONERO_TransactionHistory_transaction(hist, i);
-        if (t) out.insert(take(MONERO_TransactionInfo_hash(t)));
-    }
-    return out;
-}
-
 json WalletRuntime::doCommit(const json& p) {
-    std::shared_lock<std::shared_mutex> h(m_handleMu);
+    std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return err("no wallet open");
     RefreshPause pause(m_wallet);
     auto it = m_pendingTx.find(p.value("txHandle", ""));
     if (it == m_pendingTx.end()) return err("unknown txHandle");
     void* pt = it->second;
-    // What the wallet knew before, so the new transaction can be identified afterwards.
-    const std::set<std::string> before = knownTxids();
+    // The txid exists BEFORE the relay and is empty after it — measured, see takeJoined above.
+    // Reading it here also means the reporting cannot fail once the money has moved.
+    std::string txids = takeJoined(MONERO_PendingTransaction_txid(pt, ","));
+    if (!looksLikeTxid(txids)) txids.clear();
 
     const bool ok = MONERO_PendingTransaction_commit(pt, "", false);
     if (!ok) return err(take(MONERO_PendingTransaction_errorString(pt)));
 
-    // The relay has happened. Everything below is reporting, and MUST NOT be able to lose the
-    // fact that it happened — that is precisely what the free() on txid() used to do.
-    std::string txids = borrow(MONERO_PendingTransaction_txid(pt, ","));
-    if (!looksLikeTxid(txids)) {
-        // This build returns an unusable pointer here (freeing it aborts, reading it yields
-        // nothing), so fall back to the authority: whatever hash the wallet gained.
-        txids.clear();
-        for (const std::string& h : knownTxids())
-            if (!h.empty() && !before.count(h)) { if (!txids.empty()) txids += ","; txids += h; }
-    }
     m_pendingTx.erase(it);   // monero_c exposes no disposeTransaction; the handle is dropped
     MONERO_Wallet_store(m_wallet, "");
     return json{{"ok", true}, {"result", json{{"txids", txids}}}};
 }
 
 json WalletRuntime::doDispose(const json& p) {
-    std::shared_lock<std::shared_mutex> h(m_handleMu);
+    std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
     auto it = m_pendingTx.find(p.value("txHandle", ""));
     if (it == m_pendingTx.end()) return err("unknown txHandle");
     m_pendingTx.erase(it);
@@ -510,7 +497,7 @@ json WalletRuntime::doDispose(const json& p) {
 }
 
 json WalletRuntime::doChangePassword(const json& p) {
-    std::shared_lock<std::shared_mutex> h(m_handleMu);
+    std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return err("no wallet open");
     RefreshPause pause(m_wallet);
     if (!verifyPassword(p.value("oldPassword", ""))) return err("wrong password");
@@ -538,7 +525,10 @@ json WalletRuntime::statusLocked() {
 json WalletRuntime::status() {
     json j;
     { std::lock_guard<std::mutex> g(m_stateMu); j = statusLocked(); }
-    std::shared_lock<std::shared_mutex> h(m_handleMu);
+    // A build holds the wallet exclusively for ~15 s. Rather than stall the caller past its
+    // deadline, answer with the state we already know and say the chain figures are stale.
+    std::shared_lock<std::shared_timed_mutex> h(m_handleMu, kReadWait);
+    if (!h.owns_lock()) { j["busy"] = true; return j; }
     if (m_wallet) {
         j["connected"]    = MONERO_Wallet_connected(m_wallet) == 1;
         j["synchronized"] = MONERO_Wallet_synchronized(m_wallet);
@@ -552,23 +542,26 @@ json WalletRuntime::status() {
 }
 
 std::string WalletRuntime::balance(uint32_t account) {
-    std::shared_lock<std::shared_mutex> h(m_handleMu);
+    std::shared_lock<std::shared_timed_mutex> h(m_handleMu, kReadWait);
+    if (!h.owns_lock()) return {};   // busy: an empty string is "not read", never "zero"
     return m_wallet ? std::to_string(MONERO_Wallet_balance(m_wallet, account)) : "0";
 }
 
 std::string WalletRuntime::unlockedBalance(uint32_t account) {
-    std::shared_lock<std::shared_mutex> h(m_handleMu);
+    std::shared_lock<std::shared_timed_mutex> h(m_handleMu, kReadWait);
+    if (!h.owns_lock()) return {};   // busy: an empty string is "not read", never "zero"
     return m_wallet ? std::to_string(MONERO_Wallet_unlockedBalance(m_wallet, account)) : "0";
 }
 
 std::string WalletRuntime::address(uint64_t account, uint64_t index) {
-    std::shared_lock<std::shared_mutex> h(m_handleMu);
+    std::shared_lock<std::shared_timed_mutex> h(m_handleMu, kReadWait);
+    if (!h.owns_lock()) return {};   // busy: an empty string is "not read", never "zero"
     return m_wallet ? take(MONERO_Wallet_address(m_wallet, account, index)) : "";
 }
 
 json WalletRuntime::subaddresses(uint32_t account) {
     json out = json::array();
-    std::shared_lock<std::shared_mutex> h(m_handleMu);
+    std::shared_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return out;
     const size_t n = MONERO_Wallet_numSubaddresses(m_wallet, account);
     for (size_t i = 0; i < n; ++i) {
@@ -580,7 +573,7 @@ json WalletRuntime::subaddresses(uint32_t account) {
 }
 
 json WalletRuntime::createSubaddress(uint32_t account, const std::string& label) {
-    std::shared_lock<std::shared_mutex> h(m_handleMu);
+    std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return err("no wallet open");
     MONERO_Wallet_addSubaddress(m_wallet, account, label.c_str());
     const size_t n = MONERO_Wallet_numSubaddresses(m_wallet, account);
@@ -593,7 +586,7 @@ json WalletRuntime::createSubaddress(uint32_t account, const std::string& label)
 // Rename or clear a subaddress label. Index 0 is the account's primary address, which
 // wallet2 also labels ("Primary account"), so it is editable like any other.
 json WalletRuntime::setSubaddressLabel(uint32_t account, uint32_t index, const std::string& label) {
-    std::shared_lock<std::shared_mutex> h(m_handleMu);
+    std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return err("no wallet open");
     if (index >= MONERO_Wallet_numSubaddresses(m_wallet, account)) return err("no such subaddress");
     MONERO_Wallet_setSubaddressLabel(m_wallet, account, index, label.c_str());
@@ -604,7 +597,7 @@ json WalletRuntime::setSubaddressLabel(uint32_t account, uint32_t index, const s
 
 json WalletRuntime::history() {
     json out = json::array();
-    std::shared_lock<std::shared_mutex> h(m_handleMu);
+    std::shared_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return out;
     void* hist = MONERO_Wallet_history(m_wallet);
     if (!hist) return out;
@@ -635,7 +628,7 @@ json WalletRuntime::history() {
             {"unlockTime", MONERO_TransactionInfo_unlockTime(t)},
             {"paymentId", take(MONERO_TransactionInfo_paymentId(t))},
             {"description", take(MONERO_TransactionInfo_description(t))},
-            {"subaddrIndex", take(MONERO_TransactionInfo_subaddrIndex(t, ","))},
+            {"subaddrIndex", takeJoined(MONERO_TransactionInfo_subaddrIndex(t, ","))},
             {"destinations", dests},
             {"account", MONERO_TransactionInfo_subaddrAccount(t)}});
     }
@@ -647,7 +640,7 @@ bool WalletRuntime::addressValid(const std::string& addr, const std::string& net
 }
 
 json WalletRuntime::revealSeed(const std::string& password) {
-    std::shared_lock<std::shared_mutex> h(m_handleMu);
+    std::shared_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return err("no wallet open");
     if (!verifyPassword(password)) return err("wrong password");
     const std::string seed = take(MONERO_Wallet_seed(m_wallet, ""));
@@ -656,7 +649,7 @@ json WalletRuntime::revealSeed(const std::string& password) {
 }
 
 json WalletRuntime::revealViewKey(const std::string& password) {
-    std::shared_lock<std::shared_mutex> h(m_handleMu);
+    std::shared_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return err("no wallet open");
     if (!verifyPassword(password)) return err("wrong password");
     return json{{"ok", true}, {"result", json{{"viewKey", take(MONERO_Wallet_secretViewKey(m_wallet))},
@@ -689,7 +682,7 @@ void WalletRuntime::shutdown() {
     }
     m_cv.notify_all();
     if (m_thread.joinable()) m_thread.join();
-    std::unique_lock<std::shared_mutex> h(m_handleMu);
+    std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
     if (m_wallet) {
         MONERO_Wallet_store(m_wallet, "");
         MONERO_WalletManager_closeWallet(m_wm, m_wallet, true);
