@@ -20,6 +20,16 @@ let
   t = targets.${system} or (throw "monero_c: no prebuilt for ${system}");
   # A DLL is two files: the .dll to ship and the .dll.a import lib to link against.
   extra = if t.ext == "dll" then [ "libmonero_wallet2_api_c.dll.a" ] else [ ];
+  # monero_c is built against the winpthread threading model while the module plugins around it
+  # use mcfgthread, so nothing else in a payload brings this one in. MEASURED, not assumed:
+  # `objdump -p libmonero_wallet2_api_c.dll` lists libwinpthread-1.dll in its import table, and
+  # the portable payload gate refuses to package the module without it -- "neither a Windows
+  # system DLL nor claimed by windowsHostLibs". It ships in bin/ of the mingw pthreads package.
+  # Assembled here rather than inside installPhase: a nested '' .. '' cannot carry an antiquote.
+  winpthread =
+    if t.ext == "dll"
+    then ''install -m0644 ${pkgs.windows.mingw_w64_pthreads}/bin/libwinpthread-1.dll "$out/lib/"''
+    else ":";
   entries = map (f: "${tag}/${t.abi}/${f}") ([ "libmonero_wallet2_api_c.${t.ext}" ] ++ extra);
 in
 pkgs.stdenvNoCC.mkDerivation {
@@ -43,6 +53,7 @@ pkgs.stdenvNoCC.mkDerivation {
     # Also in lib/, because that is the only place the module builder's `include`
     # staging looks — LGPL-3.0 §4(d) wants the text beside the library it covers.
     install -m0644 ${src}/LICENSE.monero_c "$out/lib/LICENSE.monero_c"
+    ${winpthread}
     runHook postInstall
   '';
   meta = {

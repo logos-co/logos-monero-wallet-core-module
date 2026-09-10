@@ -12,6 +12,9 @@
   "codegen": { "impl_header": "monero_wallet_core_impl.h", "impl_class": "MoneroWalletCoreImpl" },
   "dependencies": ["monero_node_module"],
   "include": ["LICENSE.monero_c"],
+  "platforms": [
+    { "when": { "os": "windows" }, "include": ["libwinpthread-1.dll"] }
+  ],
   "capabilities": [],
   "nix": {
     "packages": { "build": [], "runtime": ["nlohmann_json"] },
