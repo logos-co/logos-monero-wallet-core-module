@@ -54,10 +54,11 @@ bool looksLikeTxid(const std::string& joined) {
 }
 
 // Owned by the engine: copy only. Freeing these aborts the process.
-// Proven so far for MONERO_PendingTransaction_txid; MONERO_TransactionInfo_subaddrIndex has
-// the same "join a list with a separator" signature and is treated the same way until a
-// wallet with history is available to prove it. A leak here would be bounded and harmless;
-// the alternative is a crash that takes an open wallet with it.
+//
+// Exactly ONE call is known to need this: MONERO_PendingTransaction_txid. The obvious
+// heuristic — "anything taking a separator joins into a temporary" — was TESTED AND IS FALSE:
+// MONERO_TransactionInfo_subaddrIndex takes a separator and is an ordinary owned copy. There
+// is no rule to infer from a signature. Measure each one (tools/probe_ownership.cpp).
 std::string borrow(const char* p) {
     return p ? std::string(p) : std::string();
 }
@@ -634,7 +635,7 @@ json WalletRuntime::history() {
             {"unlockTime", MONERO_TransactionInfo_unlockTime(t)},
             {"paymentId", take(MONERO_TransactionInfo_paymentId(t))},
             {"description", take(MONERO_TransactionInfo_description(t))},
-            {"subaddrIndex", borrow(MONERO_TransactionInfo_subaddrIndex(t, ","))},
+            {"subaddrIndex", take(MONERO_TransactionInfo_subaddrIndex(t, ","))},
             {"destinations", dests},
             {"account", MONERO_TransactionInfo_subaddrAccount(t)}});
     }

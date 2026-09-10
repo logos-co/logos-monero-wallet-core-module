@@ -16,14 +16,27 @@ clang++ -std=c++17 -I../lib probe_ownership.cpp -o probe \
 ./probe <wallets-dir> <wallet-name> <password> http://node.monerodevs.org:38089
 ```
 
-Measured against 0.18.4.6-RC2:
+Measured against 0.18.4.6-RC2, on a wallet with a real incoming transaction:
 
-| call | free() |
-|---|---|
-| `MONERO_Wallet_address` | SAFE |
-| `MONERO_Wallet_getSubaddressLabel` | SAFE |
-| `MONERO_PendingTransaction_errorString` | SAFE |
-| `MONERO_PendingTransaction_txid(",")` | **ABORTS — must not be freed** |
+| call | `MONERO_free` | in our code |
+|---|---|---|
+| `MONERO_Wallet_address` | SAFE | `take()` |
+| `MONERO_Wallet_getSubaddressLabel` | SAFE | `take()` |
+| `MONERO_PendingTransaction_errorString` | SAFE | `take()` |
+| `MONERO_TransactionInfo_hash` | SAFE | `take()` |
+| `MONERO_TransactionInfo_paymentId` | SAFE | `take()` |
+| `MONERO_TransactionInfo_description` | SAFE | `take()` |
+| `MONERO_TransactionInfo_subaddrIndex(",")` | SAFE | `take()` |
+| `MONERO_PendingTransaction_txid(",")` | **ABORTS** | `borrow()` |
 
-`MONERO_TransactionInfo_subaddrIndex(",")` is the other call with a separator argument and is
-treated as borrowed; proving it needs a wallet with transaction history.
+**There is no rule to infer from a signature.** The tempting heuristic — that a `separator`
+argument means the function joins a list into a temporary and hands back a dangling `.c_str()` —
+was tested and is false: `TransactionInfo_subaddrIndex` takes a separator and is an ordinary
+owned copy, and reads back correctly (`'0'`). `PendingTransaction_txid` is so far the only
+exception, and it is not merely unfreeable: the value it returns is unusable, which is why
+`doCommit` derives the txid from the wallet's own history instead.
+
+Not yet measured under this probe: `MONERO_TransactionInfo_transfers_address`, which needs a row
+with recorded destinations (an outgoing transfer). It is `take()`n today, and the history loop
+calls it for every outgoing row on every refresh — exercised continuously in a live session with
+several outgoing transactions and zero aborts — but that is observation, not a controlled test.
