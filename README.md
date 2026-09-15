@@ -32,6 +32,9 @@ mingw x64), and lays it out as `lib/` + `include/` + the license. It is **LGPL-3
 linked **dynamically** as a separate shared object beside the plugin, never statically —
 a user may substitute a modified copy by replacing that file.
 
+Some antivirus products may flag Monero components. See Monero's
+[antivirus FAQ](https://web.getmonero.org/get-started/faq/#antivirus) for more information.
+
 The license text travels with it: the derivation installs `LICENSE.monero_c` into its `lib/`
 (the only place the builder's `include` staging looks) and `metadata.json` names it in
 `include`, so it lands beside the plugin in the payload and inside the `.lgx`. `ci.yml`
