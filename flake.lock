@@ -4344,15 +4344,15 @@
       "locked": {
         "lastModified": 1789756471,
         "narHash": "sha256-oYyha+9jIqV1gPV0TlqOX85rtFlul8gLMuztcwQ6Lyg=",
-        "ref": "refs/heads/main",
+        "owner": "logos-co",
+        "repo": "logos-monero-nix",
         "rev": "f981568d2238c6f37f34aca5a45563ec326447dd",
-        "revCount": 17,
-        "type": "git",
-        "url": "file:///Users/dlipicar/repos/logos-monero-nix"
+        "type": "github"
       },
       "original": {
-        "type": "git",
-        "url": "file:///Users/dlipicar/repos/logos-monero-nix"
+        "owner": "logos-co",
+        "repo": "logos-monero-nix",
+        "type": "github"
       }
     },
     "logos-monero-nix_2": {

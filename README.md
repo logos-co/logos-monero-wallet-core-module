@@ -28,7 +28,7 @@ disconnected.
 ## The library
 
 `libmonero_wallet2_api_c.{dylib,so,dll}` is built from source by
-[logos-monero-nix](../logos-monero-nix) for every target (darwin arm64/x64, linux arm64/x64,
+[logos-monero-nix](https://github.com/logos-co/logos-monero-nix) for every target (darwin arm64/x64, linux arm64/x64,
 mingw x64): Monero at monero_c's pin with monero_c's patches, and monero_c's own wallet2 shim.
 It exports the same `MONERO_*` API as the upstream prebuilt it replaced (357 on Linux and
 Windows, 354 on darwin). It is **LGPL-3.0** and is linked **dynamically** as a separate shared
