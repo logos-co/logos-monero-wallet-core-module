@@ -19,7 +19,8 @@ they are **tickets** served by a worker thread: `startJob(kind, params)` → `jo
 `history`, `addressValid`, …) answer directly. Amounts are **decimal strings of atomic units**.
 
 The node module (`monero_node_module`) owns the daemon endpoint and proxy policy; this module
-reads it right before `init`. A network marked `proxyRequired` with no proxy **refuses to
+reads it (`effective_node`) right before `init`. In local mode that is the node `monerod_module`
+runs on this device: loopback, so trusted. A network marked `proxyRequired` with no proxy **refuses to
 open** — and because wallet2 honours the proxy but raises no error when the node is unreachable,
 a required proxy that cannot connect also fails the open rather than sitting silently
 disconnected.
