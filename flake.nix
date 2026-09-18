@@ -3,7 +3,12 @@
 
   inputs = {
     logos-module-builder.url = "github:logos-co/logos-module-builder";
-    logos-nix.url = "github:logos-co/logos-nix";
+    # Monero built from source: the wallet2 C ABI, from the same tree as the family's daemon.
+    logos-monero-nix = {
+      url = "github:logos-co/logos-monero-nix";
+      inputs.logos-nix.follows = "logos-module-builder/logos-nix";
+      inputs.nixpkgs.follows = "logos-module-builder/nixpkgs";
+    };
     # Follows THIS module-builder: a skewed generated ABI segfaults in provider init.
     monero_node_module = {
       url = "github:logos-co/logos-monero-node-module";
@@ -11,33 +16,23 @@
     };
   };
 
-  outputs = inputs@{ self, logos-module-builder, logos-nix, ... }:
+  outputs = inputs@{ logos-module-builder, logos-monero-nix, ... }:
     let
-      nixpkgs = logos-module-builder.inputs.nixpkgs;
-      lib = nixpkgs.lib;
-      nativeSystems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
-      targets = nativeSystems ++ [ "x86_64-windows" ];
-      pkgsFor = system:
-        if system == "x86_64-windows"
-        then logos-nix.lib.mkWindowsPkgs { buildSystem = "x86_64-linux"; }
-        else import nixpkgs { inherit system; };
-      # The prebuilt wallet2 C ABI, per target, shaped like a flake input so the builder's
-      # `packages.${system}.default` lookup resolves it.
-      moneroC = {
-        packages = lib.genAttrs targets (system: {
-          default = import ./nix/monero-c.nix { pkgs = pkgsFor system; src = self; };
-        });
-      };
+      lib = logos-module-builder.inputs.nixpkgs.lib;
+      targets = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" "x86_64-windows" ];
       module = logos-module-builder.lib.mkLogosModule {
         src = ./.;
         configFile = ./metadata.json;
         flakeInputs = inputs;
-        externalLibInputs = { monero_wallet2_api_c = moneroC; };
+        externalLibInputs.monero_wallet2_api_c = {
+          input = logos-monero-nix;
+          packages.default = "monero-c";
+        };
       };
     in
     {
       packages = lib.genAttrs targets (system: module.packages.${system} // {
-        monero-c = moneroC.packages.${system}.default;
+        monero-c = logos-monero-nix.packages.${system}.monero-c;
       });
     };
 }

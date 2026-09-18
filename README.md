@@ -27,20 +27,23 @@ disconnected.
 
 ## The library
 
-`nix/monero-c.nix` fetches the pinned upstream release bundle (sha256-pinned), extracts one
-`libmonero_wallet2_api_c.{dylib,so,dll}` per target (darwin arm64/x64, linux arm64/x64,
-mingw x64), and lays it out as `lib/` + `include/` + the license. It is **LGPL-3.0** and is
-linked **dynamically** as a separate shared object beside the plugin, never statically —
-a user may substitute a modified copy by replacing that file.
+`libmonero_wallet2_api_c.{dylib,so,dll}` is built from source by
+[logos-monero-nix](https://github.com/logos-co/logos-monero-nix) for every target (darwin arm64/x64, linux arm64/x64,
+mingw x64): Monero at monero_c's pin with monero_c's patches, and monero_c's own wallet2 shim.
+It exports the same `MONERO_*` API as the upstream prebuilt it replaced (357 on Linux and
+Windows, 354 on darwin). It is **LGPL-3.0** and is linked **dynamically** as a separate shared
+object beside the plugin, never statically — a user may substitute a modified copy by replacing
+that file, and the exact source and build recipe are public.
 
 Some antivirus products may flag Monero components. See Monero's
 [antivirus FAQ](https://web.getmonero.org/get-started/faq/#antivirus) for more information.
 
-The license text travels with it: the derivation installs `LICENSE.monero_c` into its `lib/`
-(the only place the builder's `include` staging looks) and `metadata.json` names it in
-`include`, so it lands beside the plugin in the payload and inside the `.lgx`. `ci.yml`
-asserts both — the library present as its own file, and the license byte-identical to this
-repo's `LICENSE.monero_c`.
+The license texts travel with it: the library installs `LICENSE.monero_c` (LGPL-3.0) and
+`LICENSE.monero` (Monero's BSD-3) into its `lib/` (the only place the builder's `include`
+staging looks) and `metadata.json` names both in `include`, so they land beside the plugin in
+the payload and inside the `.lgx`. `ci.yml` asserts all three — the library present as its own
+file, `LICENSE.monero_c` byte-identical to this repo's copy, and `LICENSE.monero` present.
+The headers in `lib/` are byte-identical to the library's own; the build uses the library's.
 
 ## Build
 
