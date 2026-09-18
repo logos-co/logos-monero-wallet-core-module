@@ -26,10 +26,11 @@ MoneroWalletCoreImpl::MoneroWalletCoreImpl() {
         else if (name == "jobFinished")   jobFinished(payload.value("jobId", ""), payload.value("state", ""));
     };
     // The node module owns endpoint + proxy policy; this module only reads it, right before
-    // init, so a switch in the settings app takes effect on the next open.
+    // init, so a switch in the settings app takes effect on the next open. effective_node, not
+    // the stored record: in local mode it resolves to the in-process node's loopback URL.
     auto resolve = [this](const std::string& network) -> json {
         try {
-            const std::string raw = modules().monero_node_module.get_node_config(network);
+            const std::string raw = modules().monero_node_module.effective_node(network);
             const json j = json::parse(raw);
             if (!j.value("ok", false)) return json{{"error", j.value("error", "node not configured")}};
             return j.value("result", json::object());
