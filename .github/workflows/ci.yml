@@ -77,4 +77,6 @@ jobs:
             || { echo "::error::LICENSE.monero_c is not in the payload"; exit 1; }
           cmp -s LICENSE.monero_c "$payload/LICENSE.monero_c" \
             || { echo "::error::payload LICENSE.monero_c differs from the copy of record"; exit 1; }
-          echo "payload carries $(basename "$1") and LICENSE.monero_c"
+          [ -s "$payload/LICENSE.monero" ] \
+            || { echo "::error::LICENSE.monero (Monero's BSD-3 notice) is not in the payload"; exit 1; }
+          echo "payload carries $(basename "$1"), LICENSE.monero_c and LICENSE.monero"
