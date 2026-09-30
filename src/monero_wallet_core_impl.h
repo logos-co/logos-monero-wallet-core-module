@@ -35,7 +35,7 @@ public:
     // ── Tickets ──────────────────────────────────────────────────────────
 
     /// Queue a long operation. `kind` is one of: open_wallet, create_wallet,
-    /// restore_from_seed, restore_from_keys, close_wallet, rescan, create_transaction,
+    /// restore_from_seed, restore_from_keys, close_wallet, rescan, rescan_spent, create_transaction,
     /// commit_transaction, dispose_transaction, change_password.
     ///
     /// `params` per kind (all strings unless noted):
@@ -45,6 +45,7 @@ public:
     ///   restore_from_keys  { name, password, network, address, viewKey, spendKey?, restoreHeight(number) }
     ///   close_wallet       { }
     ///   rescan             { }
+    ///   rescan_spent       { }  // trusted local node only; queries key-image spend state
     ///   create_transaction { address, amount (decimal atomic units), priority(number 0-3)?, accountIndex(number)?, paymentId? }
     ///   commit_transaction { txHandle }
     ///   dispose_transaction{ txHandle }

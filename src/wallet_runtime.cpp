@@ -152,7 +152,7 @@ std::string WalletRuntime::walletPath(const std::string& name) const {
 
 json WalletRuntime::startJob(const std::string& kind, const json& params) {
     static const char* kinds[] = {"open_wallet", "create_wallet", "restore_from_seed", "restore_from_keys",
-                                  "close_wallet", "rescan", "create_transaction", "commit_transaction",
+                                  "close_wallet", "rescan", "rescan_spent", "create_transaction", "commit_transaction",
                                   "dispose_transaction", "change_password"};
     bool known = false;
     for (auto k : kinds) known |= (kind == k);
@@ -240,6 +240,7 @@ void WalletRuntime::run(const std::shared_ptr<Job>& job) {
             out = doOpenLike(job);
         else if (k == "close_wallet")        out = doClose();
         else if (k == "rescan")              out = doRescan();
+        else if (k == "rescan_spent")        out = doRescanSpent();
         else if (k == "create_transaction")  out = doCreateTransaction(job->params);
         else if (k == "commit_transaction")  out = doCommit(job->params);
         else if (k == "dispose_transaction") out = doDispose(job->params);
@@ -436,6 +437,25 @@ struct RefreshPause {
 };
 }
 
+json WalletRuntime::doRescanSpent() {
+    std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
+    if (!m_wallet) return err("no wallet open");
+    // This call sends the wallet's key images to the daemon. Restrict it to the local node
+    // that openWallet explicitly marked trusted, even if a caller bypasses the UI.
+    if (!MONERO_Wallet_trustedDaemon(m_wallet))
+        return err("rechecking spent outputs requires a trusted local node");
+    if (MONERO_Wallet_connected(m_wallet) != 1)
+        return err("connect to the local node before rechecking spent outputs");
+    RefreshPause pause(m_wallet);
+    if (!MONERO_Wallet_rescanSpent(m_wallet)) {
+        const std::string e = take(MONERO_Wallet_errorString(m_wallet));
+        return err(e.empty() ? "could not recheck spent outputs" : e);
+    }
+    if (!MONERO_Wallet_store(m_wallet, ""))
+        return err("spent outputs were rechecked, but the wallet could not save the result");
+    return json{{"ok", true}, {"result", json::object()}};
+}
+
 json WalletRuntime::doCreateTransaction(const json& p) {
     std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return err("no wallet open");
@@ -535,8 +555,9 @@ json WalletRuntime::status() {
         j["walletHeight"] = MONERO_Wallet_blockChainHeight(m_wallet);
         j["daemonHeight"] = MONERO_Wallet_daemonBlockChainHeight(m_wallet);
         j["watchOnly"]    = MONERO_Wallet_watchOnly(m_wallet);
+        j["trustedDaemon"] = MONERO_Wallet_trustedDaemon(m_wallet);
     } else {
-        j["connected"] = false; j["synchronized"] = false; j["walletHeight"] = 0; j["daemonHeight"] = 0; j["watchOnly"] = false;
+        j["connected"] = false; j["synchronized"] = false; j["walletHeight"] = 0; j["daemonHeight"] = 0; j["watchOnly"] = false; j["trustedDaemon"] = false;
     }
     return j;
 }

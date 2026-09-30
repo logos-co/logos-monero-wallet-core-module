@@ -72,6 +72,7 @@ private:
     nlohmann::json doOpenLike(const std::shared_ptr<Job>& job);
     nlohmann::json doClose();
     nlohmann::json doRescan();
+    nlohmann::json doRescanSpent();
     nlohmann::json doCreateTransaction(const nlohmann::json& p);
     nlohmann::json doCommit(const nlohmann::json& p);
     nlohmann::json doDispose(const nlohmann::json& p);
