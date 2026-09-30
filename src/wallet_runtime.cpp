@@ -395,15 +395,36 @@ json WalletRuntime::doOpenLike(const std::shared_ptr<Job>& job) {
                                               {"watchOnly", MONERO_Wallet_watchOnly(w)}}}};
 }
 
+// wallet2 is NOT safe for concurrent use, and we run its own auto-refresh thread (2 s) so the
+// balance tracks the chain without polling. Building or committing a transaction while that
+// thread is inside the same wallet2 object is what monero-wallet-gui avoids by calling
+// pauseRefresh() first — and what aborted this module (signal 6) mid-commit. Pause for the
+// whole operation and resume no matter how we leave it.
+namespace {
+struct RefreshPause {
+    void* w;
+    explicit RefreshPause(void* wallet) : w(wallet) { if (w) MONERO_Wallet_pauseRefresh(w); }
+    ~RefreshPause() { if (w) { MONERO_Wallet_startRefresh(w); } }
+    RefreshPause(const RefreshPause&) = delete;
+    RefreshPause& operator=(const RefreshPause&) = delete;
+};
+}
+
 json WalletRuntime::doClose() {
     std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return err("no wallet open");
+    // Keep the wallet open when its cache cannot be saved. Closing after a failed save can
+    // forget an accepted spend and make the same outputs appear available next time.
+    {
+        RefreshPause pause(m_wallet);
+        if (!MONERO_Wallet_store(m_wallet, ""))
+            return err("wallet could not be saved; it remains open");
+    }
     setState(State::Closing);
     void* w = m_wallet;
     m_wallet = nullptr;
     m_pendingTx.clear();
     h.unlock();
-    MONERO_Wallet_store(w, "");
     const bool ok = MONERO_WalletManager_closeWallet(m_wm, w, true);
     {
         std::lock_guard<std::mutex> g(m_stateMu);
@@ -420,21 +441,6 @@ json WalletRuntime::doRescan() {
     h.unlock();
     setState(State::Syncing);
     return json{{"ok", true}, {"result", json::object()}};
-}
-
-// wallet2 is NOT safe for concurrent use, and we run its own auto-refresh thread (2 s) so the
-// balance tracks the chain without polling. Building or committing a transaction while that
-// thread is inside the same wallet2 object is what monero-wallet-gui avoids by calling
-// pauseRefresh() first — and what aborted this module (signal 6) mid-commit. Pause for the
-// whole operation and resume no matter how we leave it.
-namespace {
-struct RefreshPause {
-    void* w;
-    explicit RefreshPause(void* wallet) : w(wallet) { if (w) MONERO_Wallet_pauseRefresh(w); }
-    ~RefreshPause() { if (w) { MONERO_Wallet_startRefresh(w); } }
-    RefreshPause(const RefreshPause&) = delete;
-    RefreshPause& operator=(const RefreshPause&) = delete;
-};
 }
 
 json WalletRuntime::doRescanSpent() {
@@ -469,6 +475,22 @@ json WalletRuntime::doCreateTransaction(const json& p) {
     const int priority = p.value("priority", 0);
     const uint32_t account = p.value("accountIndex", 0u);
 
+    // A refreshed chain height does not guarantee the wallet knows about another spend in the
+    // pool (for example after a restore). Reconcile key images before selecting outputs, but
+    // only with the trusted local daemon: a remote node must not learn them implicitly.
+    if (MONERO_Wallet_trustedDaemon(m_wallet)) {
+        if (MONERO_Wallet_connected(m_wallet) != 1)
+            return err("connect to the local node before sending");
+        if (!MONERO_Wallet_rescanSpent(m_wallet)) {
+            const std::string e = take(MONERO_Wallet_errorString(m_wallet));
+            return err(e.empty() ? "could not verify spent outputs before sending" : "could not verify spent outputs: " + e);
+        }
+    }
+    // Detect an unwritable cache before the network accepts a transaction. Otherwise a
+    // later restart can reload the old spendable balance even after the relay succeeded.
+    if (!MONERO_Wallet_store(m_wallet, ""))
+        return err("wallet could not be saved; send blocked before broadcast");
+
     void* pt = MONERO_Wallet_createTransaction(m_wallet, dst.c_str(), p.value("paymentId", "").c_str(), amount,
                                                0, priority, account, "", ",");
     if (!pt) return err("createTransaction returned null");
@@ -499,13 +521,29 @@ json WalletRuntime::doCommit(const json& p) {
     // Reading it here also means the reporting cannot fail once the money has moved.
     std::string txids = takeJoined(MONERO_PendingTransaction_txid(pt, ","));
     if (!looksLikeTxid(txids)) txids.clear();
+    const uint64_t txCount = MONERO_PendingTransaction_txCount(pt);
 
     const bool ok = MONERO_PendingTransaction_commit(pt, "", false);
-    if (!ok) return err(take(MONERO_PendingTransaction_errorString(pt)));
+    if (!ok) {
+        const std::string e = take(MONERO_PendingTransaction_errorString(pt));
+        const bool rejected = txCount == 1
+                           && e.find("rejected by daemon") != std::string::npos;
+        m_pendingTx.erase(it);
+        if (rejected) return err(e);  // an explicit single-transaction rejection did not relay
+        // A timeout or lost reply can occur after the daemon accepted the transaction. The
+        // wallet API cannot prove it was rejected, so preserve the uncertain outcome and
+        // never invite an immediate second send using the same apparent balance.
+        const bool walletStored = MONERO_Wallet_store(m_wallet, "");
+        return json{{"ok", true}, {"result", json{{"txids", txids}, {"relayOutcome", "unknown"},
+                                                 {"error", e.empty() ? "broadcast result could not be verified" : e},
+                                                 {"walletStored", walletStored}}}};
+    }
 
     m_pendingTx.erase(it);   // monero_c exposes no disposeTransaction; the handle is dropped
-    MONERO_Wallet_store(m_wallet, "");
-    return json{{"ok", true}, {"result", json{{"txids", txids}}}};
+    // The daemon has accepted this transaction. A failed save must never turn that into a
+    // "failed send" response, which would invite the user to broadcast another one.
+    const bool walletStored = MONERO_Wallet_store(m_wallet, "");
+    return json{{"ok", true}, {"result", json{{"txids", txids}, {"walletStored", walletStored}}}};
 }
 
 json WalletRuntime::doDispose(const json& p) {

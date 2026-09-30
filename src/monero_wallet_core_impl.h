@@ -47,7 +47,9 @@ public:
     ///   rescan             { }
     ///   rescan_spent       { }  // trusted local node only; queries key-image spend state
     ///   create_transaction { address, amount (decimal atomic units), priority(number 0-3)?, accountIndex(number)?, paymentId? }
+    ///     Rechecks spent outputs with a trusted local daemon and saves before selecting funds.
     ///   commit_transaction { txHandle }
+    ///     Result has txids, walletStored; relayOutcome="unknown" if relay was ambiguous.
     ///   dispose_transaction{ txHandle }
     ///   change_password    { oldPassword, newPassword }
     ///
