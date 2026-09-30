@@ -80,8 +80,27 @@ int nettypeOf(const std::string& network) {
 }
 
 bool isLoopback(const std::string& url) {
-    return url.find("127.0.0.1") != std::string::npos || url.find("localhost") != std::string::npos
-        || url.find("[::1]") != std::string::npos;
+    // Trust gates key-image queries. Inspect the host, not a substring elsewhere in the URL:
+    // "localhost.example.org" and "localhost@remote.example.org" are remote nodes.
+    std::string authority = url;
+    const auto scheme = authority.find("://");
+    if (scheme != std::string::npos) authority.erase(0, scheme + 3);
+    const auto endAuthority = authority.find_first_of("/?#");
+    if (endAuthority != std::string::npos) authority.resize(endAuthority);
+    if (authority.empty() || authority.find('@') != std::string::npos) return false;
+
+    std::string host;
+    if (authority.front() == '[') {
+        const auto end = authority.find(']');
+        if (end == std::string::npos || (end + 1 < authority.size() && authority[end + 1] != ':')) return false;
+        host = authority.substr(1, end - 1);
+    } else {
+        const auto colon = authority.find(':');
+        if (colon != std::string::npos && authority.find(':', colon + 1) != std::string::npos) return false;
+        host = authority.substr(0, colon);
+    }
+    for (char& c : host) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return host == "localhost" || host == "127.0.0.1" || host == "::1";
 }
 
 // wallet2 wants host:port for its SOCKS proxy; the node module stores a URL.
