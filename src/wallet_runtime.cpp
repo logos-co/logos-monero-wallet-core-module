@@ -296,7 +296,8 @@ json WalletRuntime::doOpenLike(const std::shared_ptr<Job>& job) {
     const std::string name = p.value("name", ""), password = p.value("password", ""), network = p.value("network", "");
     if (name.empty() || name.find('/') != std::string::npos || name.find("..") != std::string::npos)
         return err("bad wallet name");
-    if (network.empty()) return err("network is required");
+    if (network != "mainnet" && network != "stagenet" && network != "testnet" && network != "regtest")
+        return err("unknown network: " + network);
 
     // Node policy first, so a refusal costs nothing.
     const json node = m_resolve(network);
@@ -339,8 +340,17 @@ json WalletRuntime::doOpenLike(const std::shared_ptr<Job>& job) {
     if (!w || MONERO_Wallet_status(w) != 0) {
         const std::string e = w ? take(MONERO_Wallet_errorString(w)) : take(MONERO_WalletManager_errorString(m_wm));
         if (w) MONERO_WalletManager_closeWallet(m_wm, w, false);
-        setState(State::Failed, e.empty() ? "open failed" : e);
+        setState(State::NoWallet, e.empty() ? "open failed" : e);
         return err(e.empty() ? "open failed" : e);
+    }
+
+    // Check the loaded wallet before configuring a daemon, exposing its balances, or refreshing.
+    // Registry metadata is advisory; the encrypted wallet is the final network authority.
+    if (MONERO_Wallet_nettype(w) != nettype) {
+        MONERO_WalletManager_closeWallet(m_wm, w, false);
+        const std::string e = "wallet network does not match selected " + network + "; select the wallet's network and try again";
+        setState(State::NoWallet, e);
+        return err(e);
     }
 
     // A fresh regtest wallet must not inherit the timestamp-based mainnet height estimate
@@ -351,7 +361,7 @@ json WalletRuntime::doOpenLike(const std::shared_ptr<Job>& job) {
     if (!ok) {
         const std::string e = take(MONERO_Wallet_errorString(w));
         MONERO_WalletManager_closeWallet(m_wm, w, k != "open_wallet");
-        setState(State::Failed, e);
+        setState(State::NoWallet, e);
         return err("init failed: " + e);
     }
     MONERO_Wallet_setTrustedDaemon(w, node.value("trusted", false) && isLoopback(url));
@@ -366,7 +376,7 @@ json WalletRuntime::doOpenLike(const std::shared_ptr<Job>& job) {
         }
         if (!connected && proxyRequired) {
             MONERO_WalletManager_closeWallet(m_wm, w, true);
-            setState(State::Failed, "daemon unreachable through the required proxy");
+            setState(State::NoWallet, "daemon unreachable through the required proxy");
             return err("daemon unreachable through the required proxy");
         }
     }
