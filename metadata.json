@@ -10,7 +10,9 @@
   "author": "Logos Core Team",
   "main": "monero_wallet_core_module_plugin",
   "codegen": { "impl_header": "monero_wallet_core_impl.h", "impl_class": "MoneroWalletCoreImpl" },
-  "dependencies": ["monero_node_module"],
+  "dependencies": [
+    { "name": "monero_node_module", "version": "~0.1.0" }
+  ],
   "include": ["LICENSE.monero_c", "LICENSE.monero"],
   "capabilities": [],
   "nix": {
