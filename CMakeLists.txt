@@ -31,7 +31,7 @@ file(READ "${CMAKE_CURRENT_SOURCE_DIR}/metadata.json" _mw_metadata_json)
 string(JSON MONERO_WALLET_CORE_VERSION GET "${_mw_metadata_json}" version)
 target_compile_definitions(monero_wallet_core_module_module_plugin
     PRIVATE MONERO_WALLET_CORE_VERSION="${MONERO_WALLET_CORE_VERSION}"
-            MONERO_C_VERSION="0.18.4.6-RC2")
+            MONERO_C_VERSION="0.18.5.3-RC1")
 
 if(NOT APPLE AND NOT WIN32)
     target_link_libraries(monero_wallet_core_module_module_plugin PRIVATE stdc++ m pthread)
