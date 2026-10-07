@@ -1,7 +1,7 @@
 {
   "name": "monero_wallet_core_module",
   "display_name": "Monero Wallet Core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "core",
   "interface": "universal",
   "concurrency": "multi",
