@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -19,10 +20,13 @@
 class WalletRuntime {
 public:
     using EmitFn = std::function<void(const std::string& event, const nlohmann::json& payload)>;
-    /// Resolves a network name to the node module's config `{ url, proxy?, proxyRequired?, trusted? }`.
+    /// Resolves a network name to the node module's config `{ url, proxy?, proxyRequired?,
+    /// trusted?, torUse?, route?, catchUp?: { url } }`.
     using NodeResolver = std::function<nlohmann::json(const std::string& network)>;
+    /// Tells the node module a wallet opened or closed on a network, which locks its settings.
+    using OpenNotifier = std::function<void(const std::string& network, bool open)>;
 
-    WalletRuntime(EmitFn emit, NodeResolver resolve);
+    WalletRuntime(EmitFn emit, NodeResolver resolve, OpenNotifier notify = {});
     ~WalletRuntime();
     WalletRuntime(const WalletRuntime&) = delete;
     WalletRuntime& operator=(const WalletRuntime&) = delete;
@@ -55,6 +59,9 @@ public:
 private:
     enum class State { NoWallet, Opening, Syncing, Ready, Closing, Failed };
     static const char* stateName(State s);
+    /// Where wallet2 dials. CatchUp and WaitingForTor are Tor routes not yet on Tor: sends wait.
+    enum class Route { Direct, CatchUp, WaitingForTor, Tor };
+    static const char* routeName(Route r);
 
     struct Job {
         std::string id, receipt, kind, state = "queued", error;
@@ -67,6 +74,11 @@ private:
     void tick();
     void setState(State s, const std::string& error = {});
     nlohmann::json statusLocked();
+    /// Worker thread: from the catch-up node, or from waiting, onto the node over Tor.
+    void moveToTor();
+    void notifyOpen(const std::string& network, bool open);
+    void resetLocksOnce();
+    bool sendsWaitForTor();
 
     // Job bodies — worker thread only.
     nlohmann::json doOpenLike(const std::shared_ptr<Job>& job);
@@ -82,6 +94,8 @@ private:
 
     EmitFn m_emit;
     NodeResolver m_resolve;
+    OpenNotifier m_notify;
+    bool m_locksReset = false;
     std::string m_walletsDir;
 
     std::thread m_thread;
@@ -107,4 +121,7 @@ private:
     std::string m_walletName, m_network, m_primaryAddress, m_lastError;
     int m_nettype = 0;
     bool m_lastSynced = false;
+    Route m_route = Route::Direct;
+    std::chrono::steady_clock::time_point m_routeSince;
+    std::string m_torUse;   // from the node module at open; empty from one that predates it
 };

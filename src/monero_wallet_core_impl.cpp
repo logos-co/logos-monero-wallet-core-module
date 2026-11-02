@@ -38,7 +38,11 @@ MoneroWalletCoreImpl::MoneroWalletCoreImpl() {
             return json{{"error", std::string("node module unreachable: ") + e.what()}};
         }
     };
-    m_rt = std::make_unique<WalletRuntime>(emit, resolve);
+    // Locks "Use Tor for" and the network's node in the node module while a wallet is open.
+    auto notify = [this](const std::string& network, bool open) {
+        modules().monero_node_module.set_wallet_open(network, open);
+    };
+    m_rt = std::make_unique<WalletRuntime>(emit, resolve, notify);
 }
 
 MoneroWalletCoreImpl::~MoneroWalletCoreImpl() = default;
