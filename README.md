@@ -39,8 +39,15 @@ The node module's setting (`all`, `identifying` or `none`) decides where wallet2
 - **The switch** runs on the worker thread once wallet2 reports synchronized: pause the refresh,
   stop any in flight and wait it out offline, then `init` again on the onion node with the
   proxy, untrusted, and resume. Nothing more goes to the catch-up node after that; a route only
-  ever moves toward Tor. A catch-up node that does not answer for 90 s gives way to Tor for the
-  catch-up too.
+  ever moves toward Tor. A catch-up node that sends no new block for 90 s gives way to Tor for
+  the catch-up too, whether it never answers or one batch takes it longer than that. The switch
+  then waits for wallet2's request in flight to time out (3.5 min at most).
+- **`status()` never waits on the node.** wallet2 holds its daemon lock for a whole request, and
+  `connected()` and the daemon's height take it, so a slow batch used to hold every `status()`
+  past its IPC deadline. A probe thread asks instead, once when a wallet opens or changes route
+  and then every 3 s while synchronized, and `status()` reports its last `connected` and
+  `daemonHeight`; `walletHeight` and `synchronized` need no lock. Mid catch-up it does not ask,
+  as it would hold the wallet behind the batch and every job with it.
 - **Sends wait:** `create_transaction` and `commit_transaction` fail with an error starting
   `waiting_for_tor:` while the route is `catch_up` or `waiting_for_tor`, so decoys (`get_outs`)
   and the broadcast only ever go over Tor.
@@ -54,7 +61,8 @@ The node module's setting (`all`, `identifying` or `none`) decides where wallet2
 `doctests/wallet-core-tor-modes.test.yaml` checks each mode against a mainnet node behind an
 HTTP front (the direct node) and a SOCKS front (Tor, to a fake onion name), both of which log
 every request: in `identifying`, a send fails `waiting_for_tor` while the catch-up is held, and
-the direct node hears nothing after the switch; `all` never reaches the direct node, `none`
+the direct node hears nothing after the switch; `stalled` holds the direct node's block requests
+for good, and `status()` still answers at once and the engine finishes the catch-up over Tor; `all` never reaches the direct node, `none`
 makes no SOCKS connection. Mainnet because its last checkpoint is near the tip, so a wallet
 restored just below it is synchronized in a minute; nothing is broadcast. The wallet holds
 nothing, so a funded send (decoys and the broadcast) is not exercised. The fronts and the script are in `tools/tor-modes/`; to run one

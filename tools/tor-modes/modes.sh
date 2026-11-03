@@ -1,5 +1,6 @@
 #!/bin/sh
-# One "Use Tor for" mode end to end: modes.sh identifying|all|none
+# One "Use Tor for" mode end to end: modes.sh identifying|all|none|stalled
+# stalled is identifying with the direct node's block requests held for good.
 # Needs LOGOS (a logosctl bundle), TREE (modules dir with tor, node and core). A mainnet node
 # (UPSTREAM, or the first of a list that answers) stands behind both fronts: http = the direct
 # node, socks = Tor to a fake onion.
@@ -7,6 +8,7 @@
 # up in a minute, where a stagenet one pulls 1.7M block hashes first.
 set -eu
 MODE=$1
+TOR_USE=$MODE; [ "$MODE" = stalled ] && TOR_USE=identifying
 HERE=$(cd "$(dirname "$0")" && pwd)
 UPSTREAMS=${UPSTREAM:-xmr-node.cakewallet.com:18081 node.sethforprivacy.com:18089 nodes.hashvault.pro:18081 node.monerodevs.org:18089}
 ONION=abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion
@@ -29,7 +31,6 @@ job() {
 }
 status_until() {
   for _ in $(seq 1 "$2"); do
-    # status() waits behind wallet2's daemon call in flight, so a slow one times it out.
     st=$(ctl call monero_wallet_core_module status) || st=""
     case "$st" in *"$1"*) printf '%s\n' "$st"; return 0;; esac
     sleep 2
@@ -65,12 +66,12 @@ ctl module load monero_node_module > /dev/null; sleep 1
 printf '%s\n' '{"allowHost":true}' > "$(ls -d "$LOGOSCTL_CONFIG_DIR"/data/monero_node_module/*/ | head -1)callers.json"
 ctl module unload monero_node_module > /dev/null; sleep 1
 ctl module load monero_wallet_core_module > /dev/null
-ctl call monero_node_module set_tor_use "$MODE"
+ctl call monero_node_module set_tor_use "$TOR_USE"
 ctl call monero_node_module set_node_config mainnet \
   "str:{\"url\":\"http://127.0.0.1:$HTTP_PORT\",\"onionUrl\":\"http://$ONION:18089\",\"proxy\":\"socks5h://127.0.0.1:$SOCKS_PORT\"}"
 ctl call monero_node_module effective_node mainnet
 
-[ "$MODE" = identifying ] && touch "$W/hold"
+[ "$TOR_USE" = identifying ] && touch "$W/hold"
 job restore_from_seed "{\"name\":\"modes\",\"password\":\"pw\",\"network\":\"mainnet\",\"seed\":\"$SEED\",\"restoreHeight\":$((TIP - 20))}"
 # To itself: the wallet holds nothing, so a send gets no further than its funds check.
 send() {
@@ -78,8 +79,20 @@ send() {
   job create_transaction "{\"address\":\"$a\",\"amount\":\"1000000\"}"
 }
 
-if [ "$MODE" = identifying ]; then
-  # No status() while a request is held: wallet2's daemon calls queue behind it.
+if [ "$MODE" = stalled ]; then
+  for _ in $(seq 1 60); do [ "$(count '\.bin' "$W/direct.log")" -gt 0 ] && break; sleep 1; done
+  # While wallet2 waits on the held request; logosctl's own deadline is 20 s.
+  t0=$(date +%s); st=$(ctl call monero_wallet_core_module status) || st=""; t1=$(date +%s)
+  [ $((t1 - t0)) -le 3 ] && echo "status while held: answered" || echo "status while held: $((t1 - t0)) s"
+  printf '%s\n' "$st" | grep -o '"route":"[a-z_]*"' || true
+  # Never released: no new block for 90 s, so the catch-up moves to Tor once the held request
+  # times out in wallet2.
+  status_until '"route":"tor"' 240
+  BEFORE=$(count . "$W/direct.log")
+  status_until '"synchronized":true' 90
+  echo "direct node, requests after the switch: $(( $(count . "$W/direct.log") - BEFORE ))"
+  rm -f "$W/hold"
+elif [ "$MODE" = identifying ]; then
   for _ in $(seq 1 60); do [ "$(count '\.bin' "$W/direct.log")" -gt 0 ] && break; sleep 1; done
   echo "send while catching up:"
   job create_transaction '{"address":"","amount":"1"}'

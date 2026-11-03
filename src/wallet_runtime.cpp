@@ -129,8 +129,11 @@ const char* const kWaitingForTor =
 // Not an address: wallet2 then dials through a connector that always fails (net/http.cpp).
 const char* const kNoRoute = "nowhere";
 
-// identifying: a catch-up node that never answers gives way to Tor for the catch-up too.
+// identifying: a catch-up node that sends no new block for this long gives way to Tor for the
+// catch-up too, whether it never answers or takes longer than this over one batch.
 constexpr std::chrono::seconds kCatchUpGiveUp{90};
+
+constexpr std::chrono::seconds kProbeEvery{3};
 
 } // namespace
 
@@ -161,6 +164,7 @@ WalletRuntime::WalletRuntime(EmitFn emit, NodeResolver resolve, OpenNotifier not
     MONERO_WalletManagerFactory_setLogLevel(0);
     m_wm = MONERO_WalletManagerFactory_getWalletManager();
     m_thread = std::thread([this] { threadMain(); });
+    m_probeThread = std::thread([this] { probeMain(); });
 }
 
 WalletRuntime::~WalletRuntime() { shutdown(); }
@@ -292,6 +296,36 @@ void WalletRuntime::run(const std::shared_ptr<Job>& job) {
     }
 }
 
+void WalletRuntime::probeMain() {
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lk(m_qmu);
+            // No predicate: an open or a move notifies to have its reading now.
+            if (!m_stop) m_probeCv.wait_for(lk, kProbeEvery);
+            if (m_stop) return;
+        }
+        try {
+            std::shared_lock<std::shared_timed_mutex> h(m_handleMu, kReadWait);
+            if (!h.owns_lock() || !m_wallet) continue;
+            // Catching up, wallet2 holds its daemon lock for whole batches, and these calls would
+            // wait behind them holding the handle, which every job needs: once per route, then
+            // only while synchronized.
+            bool wanted;
+            { std::lock_guard<std::mutex> g(m_stateMu); wanted = m_probeWanted; }
+            if (!wanted && !MONERO_Wallet_synchronized(m_wallet)) continue;
+            const bool connected = MONERO_Wallet_connected(m_wallet) == 1;
+            const uint64_t height = connected ? MONERO_Wallet_daemonBlockChainHeight(m_wallet) : 0;
+            // Still under the handle: a close in between would otherwise get this wallet's reading.
+            std::lock_guard<std::mutex> g(m_stateMu);
+            m_probed = true;
+            m_probeWanted = false;
+            m_daemonConnected = connected;
+            if (height) m_daemonHeight = height;
+        } catch (...) {
+        }
+    }
+}
+
 // Idle tick: flip syncing -> ready when wallet2 reports synchronized (and back if it
 // falls behind), so the state event fires without anyone polling status(). A Tor route not
 // on Tor yet moves to it here: from the catch-up node once synchronized, or once Tor is ready.
@@ -299,17 +333,19 @@ void WalletRuntime::tick() {
     resetLocksOnce();
     std::shared_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return;
+    // Neither waits on the daemon: wallet2 answers both from what it already holds.
     const bool synced = MONERO_Wallet_synchronized(m_wallet);
-    Route route;
-    std::chrono::steady_clock::time_point since;
-    { std::lock_guard<std::mutex> g(m_stateMu); route = m_route; since = m_routeSince; }
-    bool stuck = false;
-    if (route == Route::CatchUp && !synced && std::chrono::steady_clock::now() - since > kCatchUpGiveUp) {
-        stuck = MONERO_Wallet_connected(m_wallet) != 1;
-        // Still answering: ask again after another kCatchUpGiveUp.
-        if (!stuck) { std::lock_guard<std::mutex> g(m_stateMu); m_routeSince = std::chrono::steady_clock::now(); }
-    }
+    const uint64_t height = MONERO_Wallet_blockChainHeight(m_wallet);
     h.unlock();
+    const auto now = std::chrono::steady_clock::now();
+    Route route;
+    bool stuck;
+    {
+        std::lock_guard<std::mutex> g(m_stateMu);
+        route = m_route;
+        if (height > m_progressHeight) { m_progressHeight = height; m_progressAt = now; }
+        stuck = route == Route::CatchUp && !synced && now - m_progressAt > kCatchUpGiveUp;
+    }
     if ((route == Route::CatchUp && (synced || stuck)) || route == Route::WaitingForTor) moveToTor();
     State cur;
     { std::lock_guard<std::mutex> g(m_stateMu); cur = m_state; }
@@ -325,9 +361,15 @@ void WalletRuntime::moveToTor() {
     const std::string url = str(node, "url"), proxy = str(node, "proxy");
     const bool ready = !node.contains("error") && !url.empty() && !proxy.empty() && proxy != "tor";
 
+    if (!ready && from == Route::WaitingForTor) return;
+    // Stopped before the wait below, so a request in flight ends the refresh rather than another
+    // one starting behind it: the wait lasts until wallet2's daemon call returns.
+    {
+        std::shared_lock<std::shared_timed_mutex> s(m_handleMu, kReadWait);
+        if (s.owns_lock() && m_wallet) { MONERO_Wallet_pauseRefresh(m_wallet); MONERO_Wallet_stop(m_wallet); }
+    }
     std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return;
-    if (!ready && from == Route::WaitingForTor) return;
     // Nothing more goes to the catch-up node: stop any refresh in flight and wait it out.
     MONERO_Wallet_pauseRefresh(m_wallet);
     MONERO_Wallet_stop(m_wallet);
@@ -350,9 +392,12 @@ void WalletRuntime::moveToTor() {
     {
         std::lock_guard<std::mutex> g(m_stateMu);
         m_route = ready && error.empty() ? Route::Tor : Route::WaitingForTor;
-        m_routeSince = std::chrono::steady_clock::now();
+        m_progressAt = std::chrono::steady_clock::now();
+        m_daemonConnected = false;
+        m_probeWanted = true;
         cur = m_state;
     }
+    m_probeCv.notify_all();
     setState(cur, error);
 }
 
@@ -500,8 +545,11 @@ json WalletRuntime::doOpenLike(const std::shared_ptr<Job>& job) {
     {
         std::lock_guard<std::mutex> g(m_stateMu);
         m_walletName = name; m_network = network; m_primaryAddress = addr; m_nettype = nettype; m_lastError.clear();
-        m_route = route; m_torUse = torUse; m_routeSince = std::chrono::steady_clock::now();
+        m_route = route; m_torUse = torUse;
+        m_probed = false; m_probeWanted = true; m_daemonConnected = false; m_daemonHeight = 0;
+        m_progressHeight = 0; m_progressAt = std::chrono::steady_clock::now();
     }
+    m_probeCv.notify_all();
     notifyOpen(network, true);
     // Restrict the files wallet2 just wrote; it uses the default umask.
     std::error_code ec;
@@ -529,6 +577,7 @@ json WalletRuntime::doClose() {
         network = m_network;
         m_walletName.clear(); m_primaryAddress.clear(); m_lastSynced = false;
         m_route = Route::Direct; m_torUse.clear();
+        m_probed = false; m_daemonConnected = false; m_daemonHeight = 0;
     }
     notifyOpen(network, false);
     setState(State::NoWallet);
@@ -656,16 +705,20 @@ bool WalletRuntime::sendsWaitForTor() {
 
 json WalletRuntime::status() {
     json j;
-    { std::lock_guard<std::mutex> g(m_stateMu); j = statusLocked(); }
+    {
+        std::lock_guard<std::mutex> g(m_stateMu);
+        j = statusLocked();
+        // The probe's reading: asking wallet2 here would wait behind a slow node's batch.
+        j["connected"] = m_daemonConnected;
+        if (m_probed && m_daemonHeight) j["daemonHeight"] = m_daemonHeight;
+    }
     // A build holds the wallet exclusively for ~15 s. Rather than stall the caller past its
     // deadline, answer with the state we already know and say the chain figures are stale.
     std::shared_lock<std::shared_timed_mutex> h(m_handleMu, kReadWait);
     if (!h.owns_lock()) { j["busy"] = true; return j; }
     if (m_wallet) {
-        j["connected"]    = MONERO_Wallet_connected(m_wallet) == 1;
         j["synchronized"] = MONERO_Wallet_synchronized(m_wallet);
         j["walletHeight"] = MONERO_Wallet_blockChainHeight(m_wallet);
-        j["daemonHeight"] = MONERO_Wallet_daemonBlockChainHeight(m_wallet);
         j["watchOnly"]    = MONERO_Wallet_watchOnly(m_wallet);
     } else {
         j["connected"] = false; j["synchronized"] = false; j["walletHeight"] = 0; j["daemonHeight"] = 0; j["watchOnly"] = false;
@@ -813,7 +866,9 @@ void WalletRuntime::shutdown() {
         m_stop = true;
     }
     m_cv.notify_all();
+    m_probeCv.notify_all();
     if (m_thread.joinable()) m_thread.join();
+    if (m_probeThread.joinable()) m_probeThread.join();
     std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
     if (m_wallet) {
         MONERO_Wallet_store(m_wallet, "");
