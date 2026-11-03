@@ -66,8 +66,10 @@ jobs:
 
       - name: Run doc-tests
         run: |
+          # The node module pin is its "Use Tor for" PR (logos-monero-node-module#6) until it merges.
           nix run github:logos-co/logos-doctest -- run \
             doctests/wallet-core-stagenet.test.yaml \
+            doctests/wallet-core-tor-modes.test.yaml \
             --verbose \
             --continue-on-fail \
             --release-for logos-monero-wallet-core-module=${{ steps.commit.outputs.sha }} \

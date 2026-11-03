@@ -1,0 +1,93 @@
+name: monero_wallet_core_module under "Use Tor for"
+project_name: logos-monero-wallet-core-module
+
+# Which node the wallet engine asks, and for what, in each mode. Two fronts stand before one
+# public mainnet node: an HTTP front is the direct node, and a SOCKS front plays Tor, taking
+# a fake onion name to the same node. Both log every request path; tools/tor-modes/ has them
+# and the script each step runs. The node module is set to your own Tor (the SOCKS front), so
+# the built-in Tor never starts here.
+#
+# Mainnet, read-only: a wallet restored 20 blocks below the tip is synchronized in a minute,
+# as mainnet's last checkpoint is near the tip; stagenet's is 1.7M blocks back.
+#
+# What is not covered: a funded send. The test wallet holds nothing, so a send is refused before
+# it fetches decoys (get_outs) or broadcasts; the decoy and broadcast counts below stay 0 for
+# that reason too. What is shown is the route every request takes after the switch.
+#
+# Live dependency: a public mainnet node, the first of modes.sh's list that answers. POSIX shell
+# (dash on the Linux runner).
+
+intro: |
+  "Use Tor for" decides where the Monero wallet engine connects. In `identifying` it catches up
+  from a regular node directly, then moves to a node over Tor for everything else, and sends
+  wait for that move. `all` uses Tor alone, `none` never touches it.
+
+sections:
+  - title: "Build the engine, the node module, Tor, and the runtime"
+    steps:
+      - title: "Build and stage the modules, and fetch the test fronts"
+        run: |
+          set -eu
+          nix build 'github:logos-co/logos-logoscore-cli{release}#ctl-bundle-dir' --out-link ./logos
+          nix build 'github:logos-co/logos-monero-node-module{release}#install-portable' --no-write-lock-file -o result-node
+          nix build 'github:logos-co/logos-monero-wallet-core-module{release}#install-portable' --no-write-lock-file -o result-core
+          nix build 'github:logos-co/logos-tor-module{release}#install-portable' --no-write-lock-file -o result-tor
+          mkdir -p tree/modules
+          cp -rL result-node/modules/* result-core/modules/* result-tor/modules/* tree/modules/
+          chmod -R u+w tree
+          nix flake prefetch --json 'github:logos-co/logos-monero-wallet-core-module{release}' \
+            | python3 -c 'import json,sys;print(json.load(sys.stdin)["storePath"])' > src.path
+          ls tree/modules "$(cat src.path)/tools/tor-modes"
+        code_block: |
+          nix build 'github:logos-co/logos-logoscore-cli#ctl-bundle-dir' --out-link ./logos
+          nix build 'github:logos-co/logos-monero-node-module#install-portable' -o result-node
+          nix build 'github:logos-co/logos-monero-wallet-core-module#install-portable' -o result-core
+          nix build 'github:logos-co/logos-tor-module#install-portable' -o result-tor
+          mkdir -p tree/modules
+          cp -rL result-node/modules/* result-core/modules/* result-tor/modules/* tree/modules/
+        expect_contains: ["monero_wallet_core_module", "tor_module", "fronts.py", "modes.sh"]
+
+  - title: "Only what identifies you"
+    steps:
+      - title: "Catch up directly, then move to the node over Tor; sends wait for the move"
+        # The direct front holds the block downloads at first, so the catch-up cannot finish
+        # and a send is tried meanwhile. Once released, the engine moves to Tor and the direct
+        # node hears nothing more.
+        run: |
+          set -eu
+          LOGOS=$PWD/logos TREE=$PWD/tree/modules sh "$(cat src.path)/tools/tor-modes/modes.sh" identifying
+        expect_contains:
+          - '\"catchUp\":{\"url\":\"http://127.0.0.1:'
+          - 'waiting_for_tor: sends go only over Tor'
+          - 'SOCKS connections while catching up: 0'
+          - '"route":"tor"'
+          - '"onTor":true'
+          - 'direct node, requests after the switch: 0'
+          - 'over Tor, block requests after the switch: some'
+          - 'direct node, decoy or broadcast requests: 0'
+          - 'SOCKS connections: some'
+          - '\"torUse\":\"identifying\",\"torUseChosen\":true'
+
+  - title: "Everything"
+    steps:
+      - title: "Every request over Tor, none to the direct node"
+        run: |
+          set -eu
+          LOGOS=$PWD/logos TREE=$PWD/tree/modules sh "$(cat src.path)/tools/tor-modes/modes.sh" all
+        expect_contains:
+          - '"route":"tor"'
+          - '"synchronized":true'
+          - 'direct node, requests: 0'
+          - 'SOCKS connections: some'
+
+  - title: "Nothing"
+    steps:
+      - title: "Every request direct, and no SOCKS connection at all"
+        run: |
+          set -eu
+          LOGOS=$PWD/logos TREE=$PWD/tree/modules sh "$(cat src.path)/tools/tor-modes/modes.sh" none
+        expect_contains:
+          - '"route":"direct"'
+          - '"synchronized":true'
+          - 'direct node, requests: some'
+          - 'SOCKS connections: 0'

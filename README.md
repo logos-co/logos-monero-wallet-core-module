@@ -21,9 +21,49 @@ they are **tickets** served by a worker thread: `startJob(kind, params)` → `jo
 The node module (`monero_node_module`) owns the daemon endpoint and proxy policy; this module
 reads it (`effective_node`) right before `init`. In local mode that is the node `monerod_module`
 runs on this device: loopback, so trusted. A network marked `proxyRequired` with no proxy **refuses to
-open** — and because wallet2 honours the proxy but raises no error when the node is unreachable,
-a required proxy that cannot connect also fails the open rather than sitting silently
-disconnected.
+open**. From a node module that predates "Use Tor for", a required proxy that cannot connect
+within 10 s also fails the open, because wallet2 raises no error when the node is unreachable.
+
+## Use Tor for
+
+The node module's setting (`all`, `identifying` or `none`) decides where wallet2 connects.
+`status()` reports it as `torUse` and `route`, with `onTor` and `waitingForTor`:
+
+| route | when | wallet2 dials |
+|---|---|---|
+| `direct` | `none`, local mode, a node on this network | the node, no proxy |
+| `catch_up` | `identifying`, from the open until synchronized | the direct node (`catchUp.url`), no proxy, untrusted |
+| `waiting_for_tor` | a Tor route while the built-in Tor joins, or caught up before it is ready | nowhere: offline, its proxy an address that never connects |
+| `tor` | `all` from the open; `identifying` after the catch-up | the node over Tor (onion), through the SOCKS port |
+
+- **The switch** runs on the worker thread once wallet2 reports synchronized: pause the refresh,
+  stop any in flight and wait it out offline, then `init` again on the onion node with the
+  proxy, untrusted, and resume. Nothing more goes to the catch-up node after that; a route only
+  ever moves toward Tor. A catch-up node that does not answer for 90 s gives way to Tor for the
+  catch-up too.
+- **Sends wait:** `create_transaction` and `commit_transaction` fail with an error starting
+  `waiting_for_tor:` while the route is `catch_up` or `waiting_for_tor`, so decoys (`get_outs`)
+  and the broadcast only ever go over Tor.
+- **Lock:** an open reports `set_wallet_open(network, true)` to the node module and a close
+  `false`, which locks "Use Tor for" and that network's node while the wallet is open. The
+  first job after this module starts clears every network, as a lock left by an earlier
+  instance would otherwise stay.
+- With a node module from before this setting there is no `torUse` or `catchUp`: a proxy means
+  `tor`, none means `direct`, as before.
+
+`doctests/wallet-core-tor-modes.test.yaml` checks each mode against a mainnet node behind an
+HTTP front (the direct node) and a SOCKS front (Tor, to a fake onion name), both of which log
+every request: in `identifying`, a send fails `waiting_for_tor` while the catch-up is held, and
+the direct node hears nothing after the switch; `all` never reaches the direct node, `none`
+makes no SOCKS connection. Mainnet because its last checkpoint is near the tip, so a wallet
+restored just below it is synchronized in a minute; nothing is broadcast. The wallet holds
+nothing, so a funded send (decoys and the broadcast) is not exercised. The fronts and the script are in `tools/tor-modes/`; to run one
+mode by hand, with `LOGOS` a logosctl bundle and `TREE` a modules directory holding tor_module,
+the node module and this one:
+
+```bash
+LOGOS=./logos TREE=./tree/modules sh tools/tor-modes/modes.sh identifying
+```
 
 ## The library
 
