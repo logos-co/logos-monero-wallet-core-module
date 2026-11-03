@@ -85,9 +85,10 @@ if [ "$MODE" = stalled ]; then
   t0=$(date +%s); st=$(ctl call monero_wallet_core_module status) || st=""; t1=$(date +%s)
   [ $((t1 - t0)) -le 3 ] && echo "status while held: answered" || echo "status while held: $((t1 - t0)) s"
   printf '%s\n' "$st" | grep -o '"route":"[a-z_]*"' || true
-  # Never released: no new block for 90 s, so the catch-up moves to Tor once the held request
-  # times out in wallet2.
+  ctl call monero_wallet_core_module address 0 0 | grep -q '"result":"4' && echo "address while held: answered"
+  # Never released: no new block for 90 s, and the engine drops the direct node to move.
   status_until '"route":"tor"' 240
+  t2=$(date +%s); [ $((t2 - t0)) -le 150 ] && echo "moved to Tor: within 150 s" || echo "moved to Tor: after $((t2 - t0)) s"
   BEFORE=$(count . "$W/direct.log")
   status_until '"synchronized":true' 90
   echo "direct node, requests after the switch: $(( $(count . "$W/direct.log") - BEFORE ))"

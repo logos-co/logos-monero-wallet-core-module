@@ -4,8 +4,14 @@
 #include <set>
 #include "address_check.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <filesystem>
 #include <random>
 
@@ -134,6 +140,43 @@ const char* const kNoRoute = "nowhere";
 constexpr std::chrono::seconds kCatchUpGiveUp{90};
 
 constexpr std::chrono::seconds kProbeEvery{3};
+
+bool samePeer(const sockaddr_storage& peer, const sockaddr* a) {
+    if (peer.ss_family != a->sa_family) return false;
+    if (a->sa_family == AF_INET) {
+        const auto& p = reinterpret_cast<const sockaddr_in&>(peer);
+        const auto* q = reinterpret_cast<const sockaddr_in*>(a);
+        return p.sin_port == q->sin_port && p.sin_addr.s_addr == q->sin_addr.s_addr;
+    }
+    if (a->sa_family == AF_INET6) {
+        const auto& p = reinterpret_cast<const sockaddr_in6&>(peer);
+        const auto* q = reinterpret_cast<const sockaddr_in6*>(a);
+        return p.sin6_port == q->sin6_port && std::memcmp(&p.sin6_addr, &q->sin6_addr, sizeof q->sin6_addr) == 0;
+    }
+    return false;
+}
+
+// Shuts this process's sockets to host:port. wallet2 cannot abandon a request, and a node that
+// trickles its batch keeps every read inside the timeout; wallet2 takes the drop as a network error.
+void dropConnections(const std::string& hostport) {
+    const auto colon = hostport.rfind(':');
+    if (colon == std::string::npos) return;
+    std::string host = hostport.substr(0, colon);
+    if (host.size() > 1 && host.front() == '[' && host.back() == ']') host = host.substr(1, host.size() - 2);
+    addrinfo hints{};
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* found = nullptr;
+    if (getaddrinfo(host.c_str(), hostport.substr(colon + 1).c_str(), &hints, &found) != 0) return;
+    const long maxFd = std::min<long>(sysconf(_SC_OPEN_MAX), 4096);
+    for (int fd = 0; fd < maxFd; ++fd) {
+        sockaddr_storage peer{};
+        socklen_t len = sizeof peer;
+        if (getpeername(fd, reinterpret_cast<sockaddr*>(&peer), &len) != 0) continue;
+        for (const addrinfo* a = found; a; a = a->ai_next)
+            if (samePeer(peer, a->ai_addr)) { ::shutdown(fd, SHUT_RDWR); break; }
+    }
+    freeaddrinfo(found);
+}
 
 } // namespace
 
@@ -346,14 +389,14 @@ void WalletRuntime::tick() {
         if (height > m_progressHeight) { m_progressHeight = height; m_progressAt = now; }
         stuck = route == Route::CatchUp && !synced && now - m_progressAt > kCatchUpGiveUp;
     }
-    if ((route == Route::CatchUp && (synced || stuck)) || route == Route::WaitingForTor) moveToTor();
+    if ((route == Route::CatchUp && (synced || stuck)) || route == Route::WaitingForTor) moveToTor(stuck && !synced);
     State cur;
     { std::lock_guard<std::mutex> g(m_stateMu); cur = m_state; }
     if (cur == State::Syncing && synced) setState(State::Ready);
     else if (cur == State::Ready && !synced) setState(State::Syncing);
 }
 
-void WalletRuntime::moveToTor() {
+void WalletRuntime::moveToTor(bool abandon) {
     std::string network;
     Route from;
     { std::lock_guard<std::mutex> g(m_stateMu); network = m_network; from = m_route; }
@@ -362,19 +405,20 @@ void WalletRuntime::moveToTor() {
     const bool ready = !node.contains("error") && !url.empty() && !proxy.empty() && proxy != "tor";
 
     if (!ready && from == Route::WaitingForTor) return;
-    // Stopped before the wait below, so a request in flight ends the refresh rather than another
-    // one starting behind it: the wait lasts until wallet2's daemon call returns.
+    // Nothing more goes to the catch-up node: stop the refresh, then wait out the request in
+    // flight going offline. Shared, so reads keep answering through that wait.
     {
-        std::shared_lock<std::shared_timed_mutex> s(m_handleMu, kReadWait);
-        if (s.owns_lock() && m_wallet) { MONERO_Wallet_pauseRefresh(m_wallet); MONERO_Wallet_stop(m_wallet); }
+        std::shared_lock<std::shared_timed_mutex> s(m_handleMu);
+        if (!m_wallet) return;
+        MONERO_Wallet_pauseRefresh(m_wallet);
+        MONERO_Wallet_stop(m_wallet);
+        if (abandon && node.contains("catchUp") && node["catchUp"].is_object())
+            dropConnections(hostPort(str(node["catchUp"], "url")));
+        MONERO_Wallet_setOffline(m_wallet, true);
+        MONERO_Wallet_refresh(m_wallet);
     }
     std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return;
-    // Nothing more goes to the catch-up node: stop any refresh in flight and wait it out.
-    MONERO_Wallet_pauseRefresh(m_wallet);
-    MONERO_Wallet_stop(m_wallet);
-    MONERO_Wallet_setOffline(m_wallet, true);
-    MONERO_Wallet_refresh(m_wallet);
     std::string error;
     if (ready) {
         if (MONERO_Wallet_init(m_wallet, hostPort(url).c_str(), 0, "", "", false, false, proxyHostPort(proxy).c_str())) {
@@ -746,8 +790,8 @@ std::string WalletRuntime::address(uint64_t account, uint64_t index) {
 
 json WalletRuntime::subaddresses(uint32_t account) {
     json out = json::array();
-    std::shared_lock<std::shared_timed_mutex> h(m_handleMu);
-    if (!m_wallet) return out;
+    std::shared_lock<std::shared_timed_mutex> h(m_handleMu, kReadWait);
+    if (!h.owns_lock() || !m_wallet) return out;   // busy: none read, as address() answers ""
     const size_t n = MONERO_Wallet_numSubaddresses(m_wallet, account);
     for (size_t i = 0; i < n; ++i) {
         out.push_back(json{{"index", i},

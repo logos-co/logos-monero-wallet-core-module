@@ -77,8 +77,9 @@ private:
     void tick();
     void setState(State s, const std::string& error = {});
     nlohmann::json statusLocked();
-    /// Worker thread: from the catch-up node, or from waiting, onto the node over Tor.
-    void moveToTor();
+    /// Worker thread: from the catch-up node, or from waiting, onto the node over Tor. `abandon`
+    /// drops the catch-up node's connection first, as a stuck one may never end its request.
+    void moveToTor(bool abandon = false);
     void notifyOpen(const std::string& network, bool open);
     void resetLocksOnce();
     bool sendsWaitForTor();

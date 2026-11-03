@@ -40,8 +40,10 @@ The node module's setting (`all`, `identifying` or `none`) decides where wallet2
   stop any in flight and wait it out offline, then `init` again on the onion node with the
   proxy, untrusted, and resume. Nothing more goes to the catch-up node after that; a route only
   ever moves toward Tor. A catch-up node that sends no new block for 90 s gives way to Tor for
-  the catch-up too, whether it never answers or one batch takes it longer than that. The switch
-  then waits for wallet2's request in flight to time out (3.5 min at most).
+  the catch-up too, whether it never answers or one batch takes it longer than that. That switch
+  shuts the catch-up node's connection first: wallet2 cannot abandon a request, and a node that
+  trickles its batch keeps each read inside wallet2's timeout. Reads keep answering through any
+  switch, which waits for the request in flight under a shared lock.
 - **`status()` never waits on the node.** wallet2 holds its daemon lock for a whole request, and
   `connected()` and the daemon's height take it, so a slow batch used to hold every `status()`
   past its IPC deadline. A probe thread asks instead, once when a wallet opens or changes route
