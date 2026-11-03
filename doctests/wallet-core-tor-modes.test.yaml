@@ -84,6 +84,7 @@ sections:
           - '"route":"tor"'
           - 'moved to Tor: within 150 s'
           - '"synchronized":true'
+          - '"connected":true'
           - 'direct node, requests after the switch: 0'
           - 'SOCKS connections: some'
 

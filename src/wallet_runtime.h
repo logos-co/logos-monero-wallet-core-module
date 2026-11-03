@@ -70,8 +70,9 @@ private:
     };
 
     void threadMain();
-    /// Its own thread: the only caller of wallet2's daemon reads, which wait behind any daemon
-    /// request in flight. status() reports what it last saw.
+    /// Its own thread: reads whether wallet2 holds a connection, and the daemon's height while
+    /// synchronized, as wallet2's daemon reads wait behind any request in flight. status()
+    /// reports what it last saw.
     void probeMain();
     void run(const std::shared_ptr<Job>& job);
     void tick();
@@ -126,9 +127,10 @@ private:
     int m_nettype = 0;
     bool m_lastSynced = false;
     Route m_route = Route::Direct;
-    // The probe's last reading of the daemon, for the open wallet; m_probeWanted asks for one
-    // while catching up, which it otherwise skips.
-    bool m_probed = false, m_probeWanted = false, m_daemonConnected = false;
+    // The probe's last reading of the daemon, for the open wallet, and where wallet2 dials:
+    // the node, or the SOCKS port on a Tor route.
+    bool m_probed = false, m_daemonConnected = false;
+    std::string m_dialPeer;
     uint64_t m_daemonHeight = 0;
     // The wallet height, and when it last rose on the current route.
     uint64_t m_progressHeight = 0;

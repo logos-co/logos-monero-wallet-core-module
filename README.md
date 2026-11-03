@@ -46,10 +46,12 @@ The node module's setting (`all`, `identifying` or `none`) decides where wallet2
   switch, which waits for the request in flight under a shared lock.
 - **`status()` never waits on the node.** wallet2 holds its daemon lock for a whole request, and
   `connected()` and the daemon's height take it, so a slow batch used to hold every `status()`
-  past its IPC deadline. A probe thread asks instead, once when a wallet opens or changes route
-  and then every 3 s while synchronized, and `status()` reports its last `connected` and
-  `daemonHeight`; `walletHeight` and `synchronized` need no lock. Mid catch-up it does not ask,
-  as it would hold the wallet behind the batch and every job with it.
+  past its IPC deadline. A probe thread now reads, every 3 s, `connected` off wallet2's own
+  socket (a connection from this process to the node, or to the SOCKS port on a Tor route), and
+  `daemonHeight` from wallet2 only while synchronized: mid catch-up it would wait behind the
+  batch holding the wallet, and every job with it. `status()` reports that reading;
+  `walletHeight` and `synchronized` need no lock. Until a height is read, the app shows the node
+  module's.
 - **Sends wait:** `create_transaction` and `commit_transaction` fail with an error starting
   `waiting_for_tor:` while the route is `catch_up` or `waiting_for_tor`, so decoys (`get_outs`)
   and the broadcast only ever go over Tor.
