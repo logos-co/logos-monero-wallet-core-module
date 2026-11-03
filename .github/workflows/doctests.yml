@@ -73,7 +73,6 @@ jobs:
             --verbose \
             --continue-on-fail \
             --release-for logos-monero-wallet-core-module=${{ steps.commit.outputs.sha }} \
-            --release-for logos-monero-node-module=78965c3d9fb61062d2aa6cadfa0963a2f4be8fe3 \
             --report "${{ runner.temp }}/doctest-report.html"
 
       - name: Stage report for upload
