@@ -91,6 +91,8 @@ if [ "$MODE" = stalled ]; then
   t2=$(date +%s); [ $((t2 - t0)) -le 150 ] && echo "moved to Tor: within 150 s" || echo "moved to Tor: after $((t2 - t0)) s"
   BEFORE=$(count . "$W/direct.log")
   status_until '"synchronized":true' 90
+  # "connected" is the probe's reading, every 3 s, so it can trail the sync by a round.
+  status_until '"connected":true' 10
   echo "direct node, requests after the switch: $(( $(count . "$W/direct.log") - BEFORE ))"
   rm -f "$W/hold"
 elif [ "$MODE" = identifying ]; then
