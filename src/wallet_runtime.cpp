@@ -141,6 +141,9 @@ constexpr std::chrono::seconds kCatchUpGiveUp{90};
 
 constexpr std::chrono::seconds kProbeEvery{3};
 
+// On Tor the node module is asked again this often: it re-picks a seeded onion that stopped answering.
+constexpr std::chrono::seconds kTorAskEvery{60};
+
 bool samePeer(const sockaddr_storage& peer, const sockaddr* a) {
     if (peer.ss_family != a->sa_family) return false;
     if (a->sa_family == AF_INET) {
@@ -384,25 +387,33 @@ void WalletRuntime::tick() {
     h.unlock();
     const auto now = std::chrono::steady_clock::now();
     Route route;
-    bool stuck;
+    bool stuck, askTor;
+    std::string network, bound;
     {
         std::lock_guard<std::mutex> g(m_stateMu);
         route = m_route;
         if (height > m_progressHeight) { m_progressHeight = height; m_progressAt = now; }
         stuck = route == Route::CatchUp && !synced && now - m_progressAt > kCatchUpGiveUp;
+        askTor = route == Route::Tor && now - m_torAskedAt >= kTorAskEvery;
+        if (askTor) { m_torAskedAt = now; network = m_network; bound = m_torUrl; }
     }
     if ((route == Route::CatchUp && (synced || stuck)) || route == Route::WaitingForTor) moveToTor(stuck && !synced);
+    else if (askTor) {
+        const json node = m_resolve(network);
+        const std::string url = str(node, "url"), proxy = str(node, "proxy");
+        if (!node.contains("error") && !url.empty() && url != bound && !proxy.empty() && proxy != "tor") moveToTor(false, &node);
+    }
     State cur;
     { std::lock_guard<std::mutex> g(m_stateMu); cur = m_state; }
     if (cur == State::Syncing && synced) setState(State::Ready);
     else if (cur == State::Ready && !synced) setState(State::Syncing);
 }
 
-void WalletRuntime::moveToTor(bool abandon) {
+void WalletRuntime::moveToTor(bool abandon, const json* resolved) {
     std::string network;
     Route from;
     { std::lock_guard<std::mutex> g(m_stateMu); network = m_network; from = m_route; }
-    const json node = m_resolve(network);
+    const json node = resolved ? *resolved : m_resolve(network);
     const std::string url = str(node, "url"), proxy = str(node, "proxy");
     const bool ready = !node.contains("error") && !url.empty() && !proxy.empty() && proxy != "tor";
 
@@ -438,7 +449,8 @@ void WalletRuntime::moveToTor(bool abandon) {
     {
         std::lock_guard<std::mutex> g(m_stateMu);
         m_route = ready && error.empty() ? Route::Tor : Route::WaitingForTor;
-        m_progressAt = std::chrono::steady_clock::now();
+        m_progressAt = m_torAskedAt = std::chrono::steady_clock::now();
+        m_torUrl = m_route == Route::Tor ? url : "";
         m_daemonConnected = false;
         m_dialPeer = m_route == Route::Tor ? proxyHostPort(proxy) : "";
         cur = m_state;
@@ -594,7 +606,8 @@ json WalletRuntime::doOpenLike(const std::shared_ptr<Job>& job) {
         m_route = route; m_torUse = torUse;
         m_probed = false; m_daemonConnected = false; m_daemonHeight = 0;
         m_dialPeer = route == Route::Tor ? dialProxy : route == Route::WaitingForTor ? "" : hostPort(dialUrl);
-        m_progressHeight = 0; m_progressAt = std::chrono::steady_clock::now();
+        m_progressHeight = 0; m_progressAt = m_torAskedAt = std::chrono::steady_clock::now();
+        m_torUrl = route == Route::Tor ? url : "";
     }
     m_probeCv.notify_all();
     notifyOpen(network, true);

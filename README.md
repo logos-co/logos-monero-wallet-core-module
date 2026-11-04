@@ -44,6 +44,9 @@ The node module's setting (`all`, `identifying` or `none`) decides where wallet2
   shuts the catch-up node's connection first: wallet2 cannot abandon a request, and a node that
   trickles its batch keeps each read inside wallet2's timeout. Reads keep answering through any
   switch, which waits for the request in flight under a shared lock.
+- **On Tor, the node module is asked again every 60 s.** A seeded onion that stops answering is
+  re-picked there (its health check marks it, the next `effective_node` measures the others);
+  when the onion it hands back differs, the same switch moves wallet2 onto it.
 - **`status()` never waits on the node.** wallet2 holds its daemon lock for a whole request, and
   `connected()` and the daemon's height take it, so a slow batch used to hold every `status()`
   past its IPC deadline. A probe thread now reads, every 3 s, `connected` off wallet2's own
