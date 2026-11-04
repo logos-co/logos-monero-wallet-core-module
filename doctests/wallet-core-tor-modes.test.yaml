@@ -68,6 +68,26 @@ sections:
           - 'SOCKS connections: some'
           - '\"torUse\":\"identifying\",\"torUseChosen\":true'
 
+  - title: "A catch-up node that stalls"
+    steps:
+      - title: "Status answers while the direct node holds a block request, and the catch-up moves to Tor"
+        # The direct front holds every block request for good. status() answers from what the
+        # probe thread last read, so it never waits on the held request; with no new block for
+        # 90 s the engine drops the direct node's connection and catches up over Tor.
+        run: |
+          set -eu
+          LOGOS=$PWD/logos TREE=$PWD/tree/modules sh "$(cat src.path)/tools/tor-modes/modes.sh" stalled
+        expect_contains:
+          - 'status while held: answered'
+          - '"route":"catch_up"'
+          - 'address while held: answered'
+          - '"route":"tor"'
+          - 'moved to Tor: within 150 s'
+          - '"synchronized":true'
+          - '"connected":true'
+          - 'direct node, requests after the switch: 0'
+          - 'SOCKS connections: some'
+
   - title: "Everything"
     steps:
       - title: "Every request over Tor, none to the direct node"

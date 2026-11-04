@@ -70,12 +70,17 @@ private:
     };
 
     void threadMain();
+    /// Its own thread: reads whether wallet2 holds a connection, and the daemon's height while
+    /// synchronized, as wallet2's daemon reads wait behind any request in flight. status()
+    /// reports what it last saw.
+    void probeMain();
     void run(const std::shared_ptr<Job>& job);
     void tick();
     void setState(State s, const std::string& error = {});
     nlohmann::json statusLocked();
-    /// Worker thread: from the catch-up node, or from waiting, onto the node over Tor.
-    void moveToTor();
+    /// Worker thread: from the catch-up node, or from waiting, onto the node over Tor. `abandon`
+    /// drops the catch-up node's connection first, as a stuck one may never end its request.
+    void moveToTor(bool abandon = false);
     void notifyOpen(const std::string& network, bool open);
     void resetLocksOnce();
     bool sendsWaitForTor();
@@ -98,9 +103,9 @@ private:
     bool m_locksReset = false;
     std::string m_walletsDir;
 
-    std::thread m_thread;
+    std::thread m_thread, m_probeThread;
     std::mutex m_qmu;
-    std::condition_variable m_cv;
+    std::condition_variable m_cv, m_probeCv;
     std::deque<std::shared_ptr<Job>> m_queue;
     std::map<std::string, std::shared_ptr<Job>> m_jobs;
     bool m_stop = false;
@@ -122,6 +127,13 @@ private:
     int m_nettype = 0;
     bool m_lastSynced = false;
     Route m_route = Route::Direct;
-    std::chrono::steady_clock::time_point m_routeSince;
+    // The probe's last reading of the daemon, for the open wallet, and where wallet2 dials:
+    // the node, or the SOCKS port on a Tor route.
+    bool m_probed = false, m_daemonConnected = false;
+    std::string m_dialPeer;
+    uint64_t m_daemonHeight = 0;
+    // The wallet height, and when it last rose on the current route.
+    uint64_t m_progressHeight = 0;
+    std::chrono::steady_clock::time_point m_progressAt;
     std::string m_torUse;   // from the node module at open; empty from one that predates it
 };
