@@ -80,7 +80,7 @@ private:
     nlohmann::json statusLocked();
     /// Worker thread: from the catch-up node, or from waiting, onto the node over Tor. `abandon`
     /// drops the catch-up node's connection first, as a stuck one may never end its request.
-    void moveToTor(bool abandon = false);
+    void moveToTor(bool abandon = false, const nlohmann::json* resolved = nullptr);
     void notifyOpen(const std::string& network, bool open);
     void resetLocksOnce();
     bool sendsWaitForTor();
@@ -135,5 +135,8 @@ private:
     // The wallet height, and when it last rose on the current route.
     uint64_t m_progressHeight = 0;
     std::chrono::steady_clock::time_point m_progressAt;
+    // On a Tor route: the node wallet2 dials, and when the node module was last asked for it.
+    std::string m_torUrl;
+    std::chrono::steady_clock::time_point m_torAskedAt;
     std::string m_torUse;   // from the node module at open; empty from one that predates it
 };
