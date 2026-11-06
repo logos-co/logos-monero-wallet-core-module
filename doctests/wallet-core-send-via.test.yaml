@@ -1,0 +1,61 @@
+name: monero_wallet_core_module sends through a public node over Tor
+project_name: logos-monero-wallet-core-module
+
+# The engine on its own, against a private stagenet node: an offline monerod at difficulty 1,
+# mined to the test wallet, so a real send can be built and broadcast. Two logging fronts stand
+# before it (tools/tor-modes/fronts.py): http is the wallet's own node, socks is Tor to a public
+# onion. tools/send-via/driver.cpp runs the engine with a stand-in for the node module, which
+# hands out `send: { url, proxy }` per step, and prints one line per check.
+#
+# Not regtest: wallet2 checks each block's fork version against its network's schedule, and a
+# regtest chain jumps to the last fork at height 1. Nothing leaves this machine.
+
+intro: |
+  When the wallet syncs from your own node and sends go through a public node, the engine
+  broadcasts through that node over Tor and goes straight back to your node. A public node that
+  fails, or Tor that is not ready, sends nothing, and the engine never falls back to your node.
+
+sections:
+  - title: "Build the wallet library, a node, and the test"
+    steps:
+      - title: "monero_c, monerod_c and the compiler, at this repo's pins"
+        run: |
+          set -eu
+          nix flake prefetch --json 'github:logos-co/logos-monero-wallet-core-module{release}' \
+            | python3 -c 'import json,sys;print(json.load(sys.stdin)["storePath"])' > src.path
+          SRC=$(cat src.path)
+          python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["nodes"]["nixpkgs"]["locked"]["rev"])' \
+            "$SRC/flake.lock" > nixpkgs.rev
+          nix build 'github:logos-co/logos-monero-wallet-core-module{release}#monero-c' --no-write-lock-file -o monero-c
+          nix build --inputs-from "$SRC" 'logos-monero-nix#monerod-c' -o monerod-c
+          nix build "github:NixOS/nixpkgs/$(cat nixpkgs.rev)#nlohmann_json" -o json
+          nix build "github:NixOS/nixpkgs/$(cat nixpkgs.rev)#stdenv.cc" -o cc
+          ls monero-c/lib monerod-c/lib "$SRC/tools/send-via"
+        code_block: |
+          nix build 'github:logos-co/logos-monero-wallet-core-module#monero-c' -o monero-c
+          nix build --inputs-from . 'logos-monero-nix#monerod-c' -o monerod-c
+          nix build nixpkgs#nlohmann_json -o json
+        expect_contains: ["libmonero_wallet2_api_c", "libmonerod_c", "driver.cpp", "send-via.sh"]
+
+  - title: "Send through a public node, and back"
+    steps:
+      - title: "Each path: through the public node, Tor not ready, the public node failing, no send"
+        run: |
+          set -eu
+          SRC=$(cat src.path)
+          MONERO_C=$PWD/monero-c MONEROD_C=$PWD/monerod-c JSON_INC=$PWD/json/include \
+            nix shell "github:NixOS/nixpkgs/$(cat nixpkgs.rev)#stdenv.cc" -c sh "$SRC/tools/send-via/send-via.sh"
+        code_block: |
+          MONERO_C=./monero-c MONEROD_C=./monerod-c JSON_INC=./json/include sh tools/send-via/send-via.sh
+        expect_contains:
+          - "ok: funded"
+          - '"via":"public"'
+          - "ok: the public node heard the broadcast alone"
+          - "ok: after the public send: back on your node, trusted and online"
+          - "ok: after the public send: the public node hears nothing after the send"
+          - "ok: proxy tor: waiting_for_tor:"
+          - "ok: unreachable: public node "
+          - "ok: no fallback to your node"
+          - "ok: bad node: public node "
+          - '"via":"node"'
+          - "all checks passed"

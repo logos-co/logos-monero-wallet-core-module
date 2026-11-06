@@ -21,7 +21,7 @@ class WalletRuntime {
 public:
     using EmitFn = std::function<void(const std::string& event, const nlohmann::json& payload)>;
     /// Resolves a network name to the node module's config `{ url, proxy?, proxyRequired?,
-    /// trusted?, torUse?, route?, catchUp?: { url } }`.
+    /// trusted?, torUse?, route?, catchUp?: { url }, send?: { url, proxy } }`.
     using NodeResolver = std::function<nlohmann::json(const std::string& network)>;
     /// Tells the node module a wallet opened or closed on a network, which locks its settings.
     using OpenNotifier = std::function<void(const std::string& network, bool open)>;
@@ -91,6 +91,8 @@ private:
     nlohmann::json doRescan();
     nlohmann::json doCreateTransaction(const nlohmann::json& p);
     nlohmann::json doCommit(const nlohmann::json& p);
+    /// Under the unique handle lock: relays `pt` through another node, then binds wallet2 back.
+    bool commitThrough(void* pt, const std::string& daemon, const std::string& proxy, std::string& error);
     nlohmann::json doDispose(const nlohmann::json& p);
     nlohmann::json doChangePassword(const nlohmann::json& p);
 
@@ -139,4 +141,9 @@ private:
     std::string m_torUrl;
     std::chrono::steady_clock::time_point m_torAskedAt;
     std::string m_torUse;   // from the node module at open; empty from one that predates it
+    // Where sends go, as the node module last said (the open, each send): "node" or "public".
+    std::string m_sendsVia, m_sendHost;
+    // Worker thread only: the node and SOCKS port wallet2 is bound to, which a send through a
+    // public node returns to.
+    std::string m_boundDaemon, m_boundProxy;
 };

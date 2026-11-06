@@ -131,6 +131,9 @@ std::string str(const json& j, const char* key) {
 // The send gate's answer while a Tor route is not on Tor yet. The prefix is the code.
 const char* const kWaitingForTor =
     "waiting_for_tor: sends go only over Tor, once the wallet has caught up and moved to it";
+// The same code for a send through a public node while the node module has no SOCKS port for it.
+const char* const kSendWaitsForTor =
+    "waiting_for_tor: sends go to a public node over Tor, once Tor is ready";
 
 // Not an address: wallet2 then dials through a connector that always fails (net/http.cpp).
 const char* const kNoRoute = "nowhere";
@@ -435,6 +438,8 @@ void WalletRuntime::moveToTor(bool abandon, const json* resolved) {
     std::string error;
     if (ready) {
         if (MONERO_Wallet_init(m_wallet, hostPort(url).c_str(), 0, "", "", false, false, proxyHostPort(proxy).c_str())) {
+            m_boundDaemon = hostPort(url);
+            m_boundProxy = proxyHostPort(proxy);
             MONERO_Wallet_setTrustedDaemon(m_wallet, false);
             MONERO_Wallet_setOffline(m_wallet, false);
             MONERO_Wallet_setAutoRefreshInterval(m_wallet, 2000);
@@ -570,6 +575,8 @@ json WalletRuntime::doOpenLike(const std::shared_ptr<Job>& job) {
         setState(State::NoWallet, e);
         return err("init failed: " + e);
     }
+    m_boundDaemon = hostPort(dialUrl);
+    m_boundProxy = dialProxy;
     if (route == Route::WaitingForTor) MONERO_Wallet_setOffline(w, true);
     MONERO_Wallet_setTrustedDaemon(w, route == Route::Direct && node.value("trusted", false) && isLoopback(url));
 
@@ -604,6 +611,9 @@ json WalletRuntime::doOpenLike(const std::shared_ptr<Job>& job) {
         std::lock_guard<std::mutex> g(m_stateMu);
         m_walletName = name; m_network = network; m_primaryAddress = addr; m_nettype = nettype; m_lastError.clear();
         m_route = route; m_torUse = torUse;
+        const auto send = node.find("send");
+        m_sendsVia = send != node.end() && send->is_object() ? "public" : "node";
+        m_sendHost = m_sendsVia == "public" ? hostPort(str(*send, "url")) : "";
         m_probed = false; m_daemonConnected = false; m_daemonHeight = 0;
         m_dialPeer = route == Route::Tor ? dialProxy : route == Route::WaitingForTor ? "" : hostPort(dialUrl);
         m_progressHeight = 0; m_progressAt = m_torAskedAt = std::chrono::steady_clock::now();
@@ -636,7 +646,7 @@ json WalletRuntime::doClose() {
         std::lock_guard<std::mutex> g(m_stateMu);
         network = m_network;
         m_walletName.clear(); m_primaryAddress.clear(); m_lastSynced = false;
-        m_route = Route::Direct; m_torUse.clear();
+        m_route = Route::Direct; m_torUse.clear(); m_sendsVia.clear(); m_sendHost.clear();
         m_probed = false; m_daemonConnected = false; m_daemonHeight = 0; m_dialPeer.clear();
     }
     notifyOpen(network, false);
@@ -665,6 +675,12 @@ struct RefreshPause {
     ~RefreshPause() { if (w) { MONERO_Wallet_startRefresh(w); } }
     RefreshPause(const RefreshPause&) = delete;
     RefreshPause& operator=(const RefreshPause&) = delete;
+};
+
+// Runs `f` on every way out of a scope, a throw included.
+struct OnExit {
+    std::function<void()> f;
+    ~OnExit() { try { f(); } catch (...) {} }
 };
 }
 
@@ -702,9 +718,32 @@ json WalletRuntime::doCreateTransaction(const json& p) {
 }
 
 json WalletRuntime::doCommit(const json& p) {
+    std::string network;
+    {
+        std::shared_lock<std::shared_timed_mutex> s(m_handleMu);
+        if (!m_wallet) return err("no wallet open");
+        std::lock_guard<std::mutex> g(m_stateMu);
+        network = m_network;
+    }
+    // Where this send goes, asked now and outside the wallet lock. Without `send` (an older node
+    // module, or "your node" chosen) it goes through the node the wallet is bound to.
+    const json node = m_resolve(network);
+    if (node.contains("error")) return err("cannot tell where to send: " + str(node, "error"));
+    const auto send = node.find("send");
+    const bool viaPublic = send != node.end() && send->is_object();
+    const std::string sendUrl = viaPublic ? str(*send, "url") : "", sendProxy = viaPublic ? str(*send, "proxy") : "";
+    {
+        std::lock_guard<std::mutex> g(m_stateMu);
+        m_sendsVia = viaPublic ? "public" : "node";
+        m_sendHost = viaPublic ? hostPort(sendUrl) : "";
+    }
+
     std::unique_lock<std::shared_timed_mutex> h(m_handleMu);
     if (!m_wallet) return err("no wallet open");
     if (sendsWaitForTor()) return err(kWaitingForTor);
+    // A public node only over Tor; never the wallet's own node in its place.
+    if (viaPublic && (sendProxy.empty() || sendProxy == "tor")) return err(kSendWaitsForTor);
+    if (viaPublic && sendUrl.empty()) return err("the node module named no public node to send through");
     RefreshPause pause(m_wallet);
     auto it = m_pendingTx.find(p.value("txHandle", ""));
     if (it == m_pendingTx.end()) return err("unknown txHandle");
@@ -714,12 +753,57 @@ json WalletRuntime::doCommit(const json& p) {
     std::string txids = takeJoined(MONERO_PendingTransaction_txid(pt, ","));
     if (!looksLikeTxid(txids)) txids.clear();
 
-    const bool ok = MONERO_PendingTransaction_commit(pt, "", false);
-    if (!ok) return err(take(MONERO_PendingTransaction_errorString(pt)));
+    const std::string host = viaPublic ? hostPort(sendUrl) : m_boundDaemon;
+    std::string error;
+    const bool ok = viaPublic ? commitThrough(pt, host, proxyHostPort(sendProxy), error)
+                              : MONERO_PendingTransaction_commit(pt, "", false);
+    if (!ok) return err(viaPublic ? error : take(MONERO_PendingTransaction_errorString(pt)));
 
     m_pendingTx.erase(it);   // monero_c exposes no disposeTransaction; the handle is dropped
     MONERO_Wallet_store(m_wallet, "");
-    return json{{"ok", true}, {"result", json{{"txids", txids}}}};
+    return json{{"ok", true}, {"result", json{{"txids", txids}, {"via", viaPublic ? "public" : "node"},
+                                              {"sendHost", host}}}};
+}
+
+bool WalletRuntime::commitThrough(void* pt, const std::string& daemon, const std::string& proxy, std::string& error) {
+    void* w = m_wallet;
+    const bool trusted = MONERO_Wallet_trustedDaemon(w), offline = MONERO_Wallet_isOffline(w);
+    // Back to the bound node on every way out; offline if that fails, so nothing more goes elsewhere.
+    OnExit back{[&] {
+        bool bound = false;
+        try {
+            MONERO_Wallet_setOffline(w, true);
+            MONERO_Wallet_pauseRefresh(w);   // the commit restarted it; this waits out what it woke
+            MONERO_Wallet_refresh(w);
+            bound = MONERO_Wallet_init(w, m_boundDaemon.c_str(), 0, "", "", false, false, m_boundProxy.c_str());
+            MONERO_Wallet_setTrustedDaemon(w, trusted);
+            MONERO_Wallet_setAutoRefreshInterval(w, 2000);
+        } catch (...) {
+        }
+        MONERO_Wallet_setOffline(w, bound ? offline : true);
+        if (!bound) {
+            std::lock_guard<std::mutex> g(m_stateMu);
+            m_lastError = "could not return to your node after a send; the wallet stays offline until reopened";
+        }
+    }};
+    // Stop the refresh and wait out its request in flight, as moveToTor does.
+    MONERO_Wallet_pauseRefresh(w);
+    MONERO_Wallet_stop(w);
+    MONERO_Wallet_setOffline(w, true);
+    MONERO_Wallet_refresh(w);
+    if (!MONERO_Wallet_init(w, daemon.c_str(), 0, "", "", false, false, proxy.c_str())) {
+        const std::string why = take(MONERO_Wallet_errorString(w));
+        error = "public node " + daemon + ": " + (why.empty() ? "not an address wallet2 accepts" : why);
+        return false;
+    }
+    MONERO_Wallet_setTrustedDaemon(w, false);
+    MONERO_Wallet_setOffline(w, false);
+    const bool ok = MONERO_PendingTransaction_commit(pt, "", false);
+    // The commit restarts the refresh on its way out: offline at once, before it asks the public node.
+    MONERO_Wallet_setOffline(w, true);
+    MONERO_Wallet_pauseRefresh(w);
+    if (!ok) error = "public node " + daemon + ": " + take(MONERO_PendingTransaction_errorString(pt));
+    return ok;
 }
 
 json WalletRuntime::doDispose(const json& p) {
@@ -755,6 +839,8 @@ json WalletRuntime::statusLocked() {
            {"libraryVersion", MONERO_C_VERSION},
            {"torUse", m_torUse}, {"route", routeName(m_route)}, {"onTor", m_route == Route::Tor},
            {"waitingForTor", m_route == Route::CatchUp || m_route == Route::WaitingForTor}};
+    if (!m_sendsVia.empty()) j["sendsVia"] = m_sendsVia;
+    if (!m_sendHost.empty()) j["sendHost"] = m_sendHost;
     return j;
 }
 

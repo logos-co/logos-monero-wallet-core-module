@@ -70,6 +70,7 @@ jobs:
           nix run github:logos-co/logos-doctest -- run \
             doctests/wallet-core-stagenet.test.yaml \
             doctests/wallet-core-tor-modes.test.yaml \
+            doctests/wallet-core-send-via.test.yaml \
             --verbose \
             --continue-on-fail \
             --release-for logos-monero-wallet-core-module=${{ steps.commit.outputs.sha }} \
