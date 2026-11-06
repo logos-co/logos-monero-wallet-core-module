@@ -115,14 +115,18 @@ wallet2 marks an outgoing transaction failed, and frees its inputs, if your node
 in its pool or a block 500 s after the send. A transaction relayed by a public node has that long
 to reach your node.
 
-`tools/send-via/send-via.sh` checks all of this against a private stagenet node: an offline
-`monerod` at difficulty 1 (`chaind`, built from the same Monero tree), mined to the test wallet,
-behind the two logging fronts from `tools/tor-modes/`. The http front plays your node; the SOCKS
-front plays Tor to a public onion. A driver runs the engine with a stand-in for the node module and
-checks each path: the public node hears `/sendrawtransaction` and nothing more, the transaction
-reaches the pool, and wallet2 is back on your node, trusted and online, refreshing there. A
-refused proxy and an unreachable public node send nothing and do not fall back; a bad public
-address fails the bind, and the wallet still returns; without `send`, your node relays the send.
+`tools/send-via/send-via.sh` tests this against a private stagenet node: an offline `monerod` at
+difficulty 1 (`chaind`, built from the same Monero tree), mined to the test wallet, behind the
+two logging fronts from `tools/tor-modes/`. The http front plays your node; the SOCKS front plays
+Tor to a public onion. A driver runs the engine with a stand-in for the node module and checks:
+
+- Through the public node: it hears `/sendrawtransaction` and nothing more, the transaction
+  reaches the pool, and wallet2 is back on your node, trusted and online, refreshing there.
+- A refused proxy and an unreachable public node send nothing and do not fall back to your node.
+- A public address wallet2 will not bind to fails the send, and the wallet still returns.
+- Without `send`, your node relays the send.
+
+Not covered: an error from the node module, and binding back failing.
 
 ```bash
 MONERO_C=$(nix build --no-link --print-out-paths .#monero-c) \
