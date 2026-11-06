@@ -80,6 +80,59 @@ the node module and this one:
 LOGOS=./logos TREE=./tree/modules sh tools/tor-modes/modes.sh identifying
 ```
 
+## Sending payments through a public node
+
+When the wallet syncs from your own node (in Logos or at an address) and sends are to go
+through a public node, the node module's `effective_node` carries `send: { url, proxy }`.
+`commit_transaction` reads it fresh each time:
+
+- **With `send`**, the commit goes to `send.url` through `send.proxy`, and the wallet returns
+  to its own node right after. The engine stops the refresh, waits offline for the request in
+  flight, binds wallet2 to the public node (untrusted), commits, and binds it back with the
+  node address, SOCKS port and trusted flag it had before.
+  - It binds back on every path: a send the public node fails, a public node wallet2 will not
+    bind to, or a throw. If even that fails, the wallet stays offline and `lastError` says so.
+  - wallet2's commit restarts its refresh as it returns. The engine takes wallet2 offline in the
+    next call, before that refresh asks anything, so the public node gets the broadcast
+    (`/sendrawtransaction`) alone. A refresh thread that won that race could send it one
+    `get_version` first; the test has not seen one.
+  - Building the transaction (`create_transaction`, which fetches decoys) still uses your node.
+- **The public node fails:** the commit returns its error, starting `public node <host:port>:`.
+  Nothing was sent, and the engine never retries through your node.
+- **`send.proxy` is absent or `tor`** (the built-in Tor not ready yet): the commit fails with an
+  error starting `waiting_for_tor:`. The engine never dials a public node without a proxy.
+- **The node module returns an error:** the commit fails (`cannot tell where to send: …`)
+  rather than guess.
+- **Without `send`** (your node chosen, or a node module that predates this), the commit goes
+  through the node the wallet is bound to, as before.
+
+The commit result is `{ txids, via, sendHost }`. `via` is `node` (the node the wallet syncs from)
+or `public`; `sendHost` is the `host:port` the broadcast went to. `status()` reports `sendsVia`
+(`node` or `public`) and, for `public`, `sendHost`, as the node module last answered: at the open
+and at each commit.
+
+wallet2 marks an outgoing transaction failed, and frees its inputs, if your node has not seen it
+in its pool or a block 500 s after the send. A transaction relayed by a public node has that long
+to reach your node.
+
+`tools/send-via/send-via.sh` checks all of this against a private stagenet node: an offline
+`monerod` at difficulty 1 (`chaind`, built from the same Monero tree), mined to the test wallet,
+behind the two logging fronts from `tools/tor-modes/`. The http front plays your node; the SOCKS
+front plays Tor to a public onion. A driver runs the engine with a stand-in for the node module and
+checks each path: the public node hears `/sendrawtransaction` and nothing more, the transaction
+reaches the pool, and wallet2 is back on your node, trusted and online, refreshing there. A
+refused proxy and an unreachable public node send nothing and do not fall back; a bad public
+address fails the bind, and the wallet still returns; without `send`, your node relays the send.
+
+```bash
+MONERO_C=$(nix build --no-link --print-out-paths .#monero-c) \
+MONEROD_C=$(nix build --no-link --print-out-paths --inputs-from . logos-monero-nix#monerod-c) \
+JSON_INC=$(nix build --no-link --print-out-paths nixpkgs#nlohmann_json)/include \
+  nix shell nixpkgs#stdenv.cc -c sh tools/send-via/send-via.sh
+```
+
+`doctests/wallet-core-send-via.test.yaml` runs the same in CI, with nixpkgs at this repo's pin.
+
 ## The library
 
 `libmonero_wallet2_api_c.{dylib,so,dll}` is built from source by
