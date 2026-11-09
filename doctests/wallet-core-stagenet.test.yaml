@@ -68,7 +68,7 @@ sections:
           printf '%s\n' '{"allowHost":true}' > "$(ls -d "$LOGOSCTL_CONFIG_DIR"/data/monero_node_module/*/ | head -1)callers.json"
           ./logos/bin/logosctl module unload monero_node_module; sleep 1
           ./logos/bin/logosctl module load monero_wallet_core_module
-          ./logos/bin/logosctl call monero_node_module set_tor_use none
+          ./logos/bin/logosctl call monero_node_module set_tor_use stagenet none
           ./logos/bin/logosctl call monero_node_module init_defaults
           # wallet2 binds its daemon at init, so the node has to be reachable BEFORE the
           # wallet is created — a wallet built against a dead endpoint stays disconnected for

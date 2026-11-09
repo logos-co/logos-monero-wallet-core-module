@@ -66,7 +66,7 @@ ctl module load monero_node_module > /dev/null; sleep 1
 printf '%s\n' '{"allowHost":true}' > "$(ls -d "$LOGOSCTL_CONFIG_DIR"/data/monero_node_module/*/ | head -1)callers.json"
 ctl module unload monero_node_module > /dev/null; sleep 1
 ctl module load monero_wallet_core_module > /dev/null
-ctl call monero_node_module set_tor_use "$TOR_USE"
+ctl call monero_node_module set_tor_use mainnet "$TOR_USE"
 ctl call monero_node_module set_node_config mainnet \
   "str:{\"url\":\"http://127.0.0.1:$HTTP_PORT\",\"onionUrl\":\"http://$ONION:18089\",\"proxy\":\"socks5h://127.0.0.1:$SOCKS_PORT\"}"
 ctl call monero_node_module effective_node mainnet
@@ -120,4 +120,4 @@ echo "direct node, decoy or broadcast requests: $(( $(count get_outs "$W/direct.
 echo "direct node, requests: $(count . "$W/direct.log")" | some
 echo "SOCKS connections: $(count '^connect' "$W/tor.log")" | some
 job close_wallet '{}' > /dev/null
-ctl call monero_node_module tor_use
+ctl call monero_node_module tor_use mainnet
